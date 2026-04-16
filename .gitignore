@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local legacy reference implementation and data
+simple-tSNR/
+
+# Local notes/spec variants not for tracking
+New_comparison.md
+tSNR_SPEC.md
