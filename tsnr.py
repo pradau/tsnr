@@ -1,10 +1,12 @@
 # Author: Perry Radau
 # Date: 2026-04-16
 # Compute raw tSNR maps and summary statistics for phantom and brain fMRI inputs.
-# Dependencies: Python 3.10+, nibabel, numpy, scipy
-# Usage: uv run python main.py /path/to/input.nii.gz phantom
-#        uv run python main.py /path/to/input.nii.gz brain --threshold 0.25 --erosion-voxels 2
-#        uv run python main.py /path/to/cache.npz phantom --roi-size 15
+# Dependencies: Python 3.10+, nibabel, numpy, scipy; optional FSL (brain T1 mask)
+# Usage: uv run python tsnr.py /path/to/input.nii.gz phantom
+#        uv run python tsnr.py /path/to/input.nii.gz brain --threshold 0.25 --erosion-voxels 2
+#        uv run python tsnr.py /path/to/cache.npz phantom --roi-size 15
+#        uv run python tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
+#        uv run python tsnr.py /path/to/input.nii.gz phantom --first-timepoint 0
 
 """tSNR calculation helpers and CLI orchestration."""
 
@@ -12,13 +14,207 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
 from scipy.ndimage import binary_erosion, center_of_mass
+
+
+def fsl_dir() -> Path:
+    """Return FSL installation root from ``FSLDIR`` or a default path.
+
+    Returns:
+        Path: Directory containing FSL (must include ``etc/fslconf/fsl.sh``).
+    """
+    return Path(os.environ.get("FSLDIR", "/Users/pradau/fsl"))
+
+
+def find_t1_in_anat(func_input_path: Path) -> Optional[Path]:
+    """Locate a T1-weighted NIfTI under BIDS-style ``anat/`` next to ``func/``.
+
+    Tries, in order:
+
+    1. ``func_input_path.parent.parent / "anat"`` when the bold file lives under
+       ``.../<subject|session>/func/``.
+    2. ``func_input_path.parent / "anat"`` for flat or custom layouts.
+
+    Args:
+        func_input_path (Path): Path to the 4D functional NIfTI.
+
+    Returns:
+        Optional[Path]: First ``*.nii*`` file found in the first existing
+        ``anat`` directory (sorted for deterministic choice), or ``None``.
+    """
+    candidates = (func_input_path.parent.parent / "anat", func_input_path.parent / "anat")
+    for anat_dir in candidates:
+        if not anat_dir.is_dir():
+            continue
+        matches = sorted(anat_dir.glob("*.nii*"))
+        if matches:
+            return matches[0]
+    return None
+
+
+def _format_brain_pipeline_error(exc: BaseException) -> str:
+    """Produce a concise message for JSON when the T1-to-functional pipeline fails.
+
+    Args:
+        exc (BaseException): Exception raised during BET, FLIRT, or mask loading.
+
+    Returns:
+        str: Truncated, stderr-aware description for ``brain_masking.detail``.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        parts = [f"FSL command failed with exit code {exc.returncode}"]
+        if exc.stderr and exc.stderr.strip():
+            parts.append(exc.stderr.strip())
+        elif exc.stdout and exc.stdout.strip():
+            parts.append(exc.stdout.strip())
+        return "\n".join(parts)[:4000]
+    return str(exc)[:4000]
+
+
+def _brain_masking_success(t1_path: Path) -> Dict[str, Any]:
+    """Build ``brain_masking`` JSON when the T1 BET plus FLIRT mask is used."""
+    return {
+        "method": "t1_bet_registered_to_mean_epi",
+        "t1_path": str(t1_path.resolve()),
+        "t1_to_functional_pipeline": "success",
+        "detail": None,
+    }
+
+
+def _brain_masking_fallback_no_t1() -> Dict[str, Any]:
+    """Build ``brain_masking`` JSON when no T1 is found under ``anat/``."""
+    return {
+        "method": "mean_intensity",
+        "t1_path": None,
+        "t1_to_functional_pipeline": "not_attempted_no_t1",
+        "detail": (
+            "No T1-weighted NIfTI found under anat/ (checked next to the functional "
+            "path and one level up for BIDS-style func/ layout)."
+        ),
+    }
+
+
+def _brain_masking_fallback_pipeline_failed(t1_path: Optional[Path], exc: BaseException) -> Dict[str, Any]:
+    """Build ``brain_masking`` JSON when BET or registration fails."""
+    return {
+        "method": "mean_intensity",
+        "t1_path": str(t1_path.resolve()) if t1_path is not None else None,
+        "t1_to_functional_pipeline": "failed",
+        "detail": _format_brain_pipeline_error(exc),
+    }
+
+
+def _brain_masking_fallback_no_nifti_header() -> Dict[str, Any]:
+    """Build ``brain_masking`` JSON for defensive brain path without spatial NIfTI."""
+    return {
+        "method": "mean_intensity",
+        "t1_path": None,
+        "t1_to_functional_pipeline": "not_attempted_no_nifti",
+        "detail": "Spatial NIfTI header is required for brain masking.",
+    }
+
+
+def _run_fsl_bash(fsl_root: Path, command: str) -> None:
+    """Run a shell command after sourcing FSL configuration.
+
+    Args:
+        fsl_root (Path): FSL installation root.
+        command (str): Shell command(s) to run after ``fsl.sh`` is sourced.
+
+    Raises:
+        subprocess.CalledProcessError: If the command exits non-zero.
+        FileNotFoundError: If ``fsl.sh`` is missing.
+    """
+    fsl_sh = fsl_root / "etc" / "fslconf" / "fsl.sh"
+    if not fsl_sh.is_file():
+        raise FileNotFoundError(f"FSL config not found: {fsl_sh}")
+    inner = f'source "{fsl_sh}" && set -euo pipefail && {command}'
+    subprocess.run(
+        ["bash", "-lc", inner],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def create_bet_mask_for_func(
+    t1_path: Path,
+    mean_volume: np.ndarray,
+    source_nifti: nib.Nifti1Image,
+    work_dir: Path,
+) -> Path:
+    """Build a brain mask in functional space via BET on T1, FLIRT, and inverse warp.
+
+    Pipeline: BET on T1 (``-m -f 0.35 -R``); save temporal mean EPI; quick BET on
+    mean EPI; rigid FLIRT (dof=6) from mean-EPI-brain to T1-brain; invert transform;
+    apply T1 brain mask to full mean EPI grid with nearest-neighbor interpolation.
+
+    Args:
+        t1_path (Path): T1-weighted NIfTI path.
+        mean_volume (np.ndarray): 3D temporal mean (same space as ``source_nifti``).
+        source_nifti (nib.Nifti1Image): Functional image header/affine for the mean.
+        work_dir (Path): Directory for intermediate files (created if missing).
+
+    Returns:
+        Path: Path to ``func_brain_mask.nii.gz`` in ``work_dir``.
+
+    Raises:
+        ValueError: If output mask shape does not match ``mean_volume`` or mask is empty.
+        subprocess.CalledProcessError: If an FSL tool fails.
+        FileNotFoundError: If FSL is not installed at ``fsl_dir()``.
+    """
+    if mean_volume.shape != tuple(source_nifti.shape[:3]):
+        raise ValueError("mean_volume shape must match functional NIfTI spatial shape")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fsl_root = fsl_dir()
+    t1_abs = t1_path.resolve()
+    stem_t1 = work_dir / "t1_bet"
+    mean_vol_path = work_dir / "func_mean.nii.gz"
+    stem_mean = work_dir / "mean_epi_bet"
+    func2t1 = work_dir / "func2t1.mat"
+    t12func = work_dir / "t12func.mat"
+    mask_out = work_dir / "func_brain_mask.nii.gz"
+
+    mean_img = nib.Nifti1Image(mean_volume.astype(np.float32), source_nifti.affine, source_nifti.header)
+    nib.save(mean_img, str(mean_vol_path))
+
+    _run_fsl_bash(fsl_root, f'bet "{t1_abs}" "{stem_t1}" -m -f 0.35 -R')
+    _run_fsl_bash(fsl_root, f'bet "{mean_vol_path}" "{stem_mean}" -m')
+    t1_brain = Path(f"{stem_t1}_brain.nii.gz")
+    mean_brain = Path(f"{stem_mean}_brain.nii.gz")
+    t1_mask = Path(f"{stem_t1}_brain_mask.nii.gz")
+    if not t1_brain.is_file() or not mean_brain.is_file() or not t1_mask.is_file():
+        raise ValueError("BET did not produce expected outputs")
+
+    _run_fsl_bash(
+        fsl_root,
+        f'flirt -in "{mean_brain}" -ref "{t1_brain}" -omat "{func2t1}" -dof 6',
+    )
+    _run_fsl_bash(
+        fsl_root,
+        f'convert_xfm -omat "{t12func}" -inverse "{func2t1}"',
+    )
+    _run_fsl_bash(
+        fsl_root,
+        f'flirt -in "{t1_mask}" -ref "{mean_vol_path}" -applyxfm -init "{t12func}" '
+        f'-out "{mask_out}" -interp nearestneighbour',
+    )
+
+    loaded = nib.load(str(mask_out))
+    data = np.asarray(loaded.get_fdata(dtype=np.float64))
+    if data.shape != mean_volume.shape:
+        raise ValueError("Registered brain mask shape does not match mean volume")
+    if not np.any(data > 0.5):
+        raise ValueError("Registered brain mask is empty")
+    return mask_out
 
 
 def derive_basename(input_path: Path) -> str:
@@ -34,6 +230,61 @@ def derive_basename(input_path: Path) -> str:
     if name.endswith(".nii.gz"):
         return name[: -len(".nii.gz")]
     return input_path.stem
+
+
+def apply_timepoint_selection(
+    data_4d: np.ndarray,
+    first_index: int,
+    last_index_inclusive: Optional[int],
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    """Slice the time axis to match legacy-style volume ranges (for example `2..-`).
+
+    Args:
+        data_4d (np.ndarray): Full `(x, y, z, t)` volume.
+        first_index (int): 0-based index of the first timepoint to include.
+        last_index_inclusive (Optional[int]): 0-based index of the last timepoint to
+            include, or None to use the final volume in the file.
+
+    Returns:
+        Tuple[np.ndarray, Dict[str, int]]: Sliced array and selection metadata
+            (`first_index`, `last_index_inclusive`, `n_timepoints_in_file`,
+            `n_timepoints_used`).
+
+    Raises:
+        ValueError: If indices are out of range or fewer than two timepoints remain.
+    """
+    n_t = int(data_4d.shape[3])
+    if first_index < 0:
+        raise ValueError("--first-timepoint must be >= 0")
+    if first_index >= n_t:
+        raise ValueError(
+            f"--first-timepoint {first_index} is out of range for {n_t} volume(s) on file"
+        )
+    if last_index_inclusive is None:
+        last = n_t - 1
+    else:
+        last = last_index_inclusive
+    if last < 0 or last >= n_t:
+        raise ValueError(
+            f"--last-timepoint {last} is out of range for {n_t} volume(s) on file"
+        )
+    if last < first_index:
+        raise ValueError("--last-timepoint must be >= --first-timepoint")
+    sliced = data_4d[:, :, :, first_index : last + 1]
+    n_used = int(sliced.shape[3])
+    if n_used < 2:
+        raise ValueError(
+            "After timepoint selection, at least 2 volumes are required for tSNR "
+            f"(got {n_used}); widen --first-timepoint/--last-timepoint or use more "
+            "volumes in the input"
+        )
+    meta = {
+        "first_index": int(first_index),
+        "last_index_inclusive": int(last),
+        "n_timepoints_in_file": n_t,
+        "n_timepoints_used": n_used,
+    }
+    return sliced, meta
 
 
 def validate_common_args(mode: str, threshold: float, erosion_voxels: int) -> None:
@@ -200,25 +451,23 @@ def extract_phantom_tsnr(
     return finite_values, params
 
 
-def extract_brain_tsnr(
-    tsnr_map: np.ndarray,
+def build_brain_mask(
     mean_volume: np.ndarray,
     threshold: float,
     erosion_voxels: int,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Extract brain-mask tSNR values.
+) -> np.ndarray:
+    """Build the same boolean brain mask used for ROI statistics.
 
     Args:
-        tsnr_map (np.ndarray): 3D tSNR map.
-        mean_volume (np.ndarray): 3D mean volume.
-        threshold (float): Relative threshold fraction.
+        mean_volume (np.ndarray): 3D temporal mean volume.
+        threshold (float): Relative threshold fraction (vs positive-voxel baseline).
         erosion_voxels (int): Binary erosion iterations.
 
     Returns:
-        Tuple[np.ndarray, Dict[str, Any]]: Brain values and parameter metadata.
+        np.ndarray: Boolean array shaped like ``mean_volume``.
 
     Raises:
-        ValueError: If mask creation fails or is empty.
+        ValueError: If there are no positive voxels to define a baseline.
     """
     positive = mean_volume > 0.0
     if not np.any(positive):
@@ -227,17 +476,79 @@ def extract_brain_tsnr(
     mask = mean_volume >= (threshold * baseline)
     if erosion_voxels > 0:
         mask = binary_erosion(mask, iterations=erosion_voxels)
+    return mask
+
+
+def build_phantom_roi_mask(volume_shape: Tuple[int, int, int], params: Dict[str, Any]) -> np.ndarray:
+    """Build a 3D mask that is True only on the phantom ROI slice patch.
+
+    Args:
+        volume_shape (Tuple[int, int, int]): ``(x, y, z)`` shape of 3D maps.
+        params (Dict[str, Any]): Phantom ``parameters`` dict with ``roi_bounds`` and
+            ``slice_index``.
+
+    Returns:
+        np.ndarray: Boolean mask shaped ``volume_shape``.
+    """
+    row_start, row_end, col_start, col_end = params["roi_bounds"]
+    z = int(params["slice_index"])
+    mask = np.zeros(volume_shape, dtype=bool)
+    mask[row_start:row_end, col_start:col_end, z] = True
+    return mask
+
+
+def extract_brain_tsnr(
+    tsnr_map: np.ndarray,
+    mean_volume: np.ndarray,
+    threshold: float,
+    erosion_voxels: int,
+    brain_mask: Optional[np.ndarray] = None,
+    brain_masking_report: Optional[Dict[str, Any]] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Extract brain-mask tSNR values.
+
+    In ``brain`` mode, when ``brain_mask`` is ``None``, the mask is built from the
+    temporal mean (threshold times positive-voxel baseline, then erosion). When
+    ``brain_mask`` is set (for example from T1 BET + registration), that array is
+    used instead. ``threshold`` and ``erosion_voxels`` always record CLI values;
+    when ``brain_mask`` is set they do not define the spatial mask.
+
+    Args:
+        tsnr_map (np.ndarray): 3D tSNR map.
+        mean_volume (np.ndarray): 3D mean volume.
+        threshold (float): Relative threshold fraction.
+        erosion_voxels (int): Binary erosion iterations.
+        brain_mask (Optional[np.ndarray]): If provided, boolean mask shaped like
+            ``mean_volume``; otherwise intensity thresholding + erosion is used.
+        brain_masking_report (Optional[Dict[str, Any]]): Optional ``brain_masking``
+            object merged into ``parameters`` (method, T1 path, pipeline status).
+
+    Returns:
+        Tuple[np.ndarray, Dict[str, Any]]: Brain values and parameter metadata.
+
+    Raises:
+        ValueError: If mask creation fails or is empty.
+    """
+    if brain_mask is None:
+        mask = build_brain_mask(mean_volume, threshold, erosion_voxels)
+    else:
+        mask = np.asarray(brain_mask, dtype=bool)
+        if mask.shape != mean_volume.shape:
+            raise ValueError("brain_mask must match mean_volume shape")
     if not np.any(mask):
         raise ValueError("brain mask is empty after erosion")
+    baseline = float(np.mean(mean_volume[mean_volume > 0.0]))
     values = tsnr_map[mask]
     finite_values = values[np.isfinite(values)]
     if finite_values.size == 0:
         raise ValueError("brain mask contains zero valid voxels")
-    params = {
+    params: Dict[str, Any] = {
         "threshold": float(threshold),
         "erosion_voxels": int(erosion_voxels),
         "mask_baseline_mean_positive_signal": baseline,
     }
+    if brain_masking_report is not None:
+        params["brain_masking"] = brain_masking_report
     return finite_values, params
 
 
@@ -259,6 +570,33 @@ def summarize(values: np.ndarray) -> Dict[str, float]:
     }
 
 
+def apply_spatial_mask_nan(
+    tsnr_map: np.ndarray,
+    mean_volume: np.ndarray,
+    std_volume: np.ndarray,
+    mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Copy volumes and set voxels outside ``mask`` to NaN (float32).
+
+    Args:
+        tsnr_map (np.ndarray): 3D tSNR map.
+        mean_volume (np.ndarray): 3D temporal mean.
+        std_volume (np.ndarray): 3D temporal std.
+        mask (np.ndarray): Boolean mask, same shape as each volume.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: Masked copies as ``float32``.
+    """
+    tsnr_out = tsnr_map.astype(np.float32, copy=True)
+    mean_out = mean_volume.astype(np.float32, copy=True)
+    std_out = std_volume.astype(np.float32, copy=True)
+    inv = ~mask
+    tsnr_out[inv] = np.nan
+    mean_out[inv] = np.nan
+    std_out[inv] = np.nan
+    return tsnr_out, mean_out, std_out
+
+
 def save_outputs(
     input_path: Path,
     output_dir: Path,
@@ -266,10 +604,16 @@ def save_outputs(
     mode: str,
     data_4d: np.ndarray,
     tsnr_map: np.ndarray,
+    mean_volume: np.ndarray,
+    std_volume: np.ndarray,
     selected_values: np.ndarray,
     parameters: Dict[str, Any],
+    timepoint_selection: Dict[str, int],
     source_nifti: Optional[nib.Nifti1Image],
-) -> Tuple[Path, Path]:
+    write_tmean_tstd: bool,
+    mask_maps: bool = True,
+    brain_mask_override: Optional[np.ndarray] = None,
+) -> Tuple[Path, Path, List[Path]]:
     """Write map and JSON outputs.
 
     Args:
@@ -277,32 +621,91 @@ def save_outputs(
         output_dir (Path): Output directory.
         input_type (str): `nifti` or `fmriqa_pixel_cache_npz`.
         mode (str): Analysis mode.
-        data_4d (np.ndarray): Internal `(x, y, z, t)` data.
+        data_4d (np.ndarray): Internal `(x, y, z, t)` data after timepoint selection.
         tsnr_map (np.ndarray): 3D tSNR map.
+        mean_volume (np.ndarray): 3D temporal mean (legacy-style `Tmean`).
+        std_volume (np.ndarray): 3D temporal standard deviation with `ddof=1`
+            (legacy-style `Tstd`).
         selected_values (np.ndarray): Values used for summary.
         parameters (Dict[str, Any]): Mode-specific parameters.
+        timepoint_selection (Dict[str, int]): Indices and counts for the time axis.
         source_nifti (Optional[nib.Nifti1Image]): Source image for affine/header.
+        write_tmean_tstd (bool): When True, also write `{basename}_Tmean.nii.gz`
+            and `{basename}_Tstd.nii.gz` for troubleshooting.
+        mask_maps (bool): When True (default), voxels outside the analysis ROI are
+            set to NaN in written NIfTI maps so viewers match JSON ROI summaries.
+        brain_mask_override (Optional[np.ndarray]): For ``brain`` mode, optional
+            boolean mask (same shape as ``mean_volume``) to use instead of
+            recomputing the intensity-based mask.
 
     Returns:
-        Tuple[Path, Path]: `(map_path, stats_path)`.
+        Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_map_paths)`.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     basename = derive_basename(input_path)
     map_path = output_dir / f"{basename}_tsnr_map.nii.gz"
     stats_path = output_dir / f"{basename}_tsnr_stats.json"
 
+    output_map_censoring = "full_fov"
+    tsnr_save = tsnr_map
+    mean_save = mean_volume
+    std_save = std_volume
+    if mask_maps:
+        if mode == "brain":
+            if brain_mask_override is not None:
+                spatial_mask = np.asarray(brain_mask_override, dtype=bool)
+            else:
+                spatial_mask = build_brain_mask(
+                    mean_volume,
+                    float(parameters["threshold"]),
+                    int(parameters["erosion_voxels"]),
+                )
+        elif mode == "phantom":
+            spatial_mask = build_phantom_roi_mask(tsnr_map.shape, parameters)
+        else:
+            spatial_mask = np.ones(tsnr_map.shape, dtype=bool)
+        tsnr_save, mean_save, std_save = apply_spatial_mask_nan(
+            tsnr_map,
+            mean_volume,
+            std_volume,
+            spatial_mask,
+        )
+        output_map_censoring = "roi_masked"
+
     if source_nifti is not None:
         map_img = nib.Nifti1Image(
-            tsnr_map.astype(np.float32),
+            tsnr_save.astype(np.float32),
             source_nifti.affine,
             source_nifti.header,
         )
         map_affine_source = "input"
     else:
-        map_img = nib.Nifti1Image(tsnr_map.astype(np.float32), np.eye(4, dtype=np.float64))
+        map_img = nib.Nifti1Image(tsnr_save.astype(np.float32), np.eye(4, dtype=np.float64))
         map_affine_source = "identity"
 
     nib.save(map_img, str(map_path))
+    optional_paths: List[Path] = []
+    if write_tmean_tstd:
+        tmean_path = output_dir / f"{basename}_Tmean.nii.gz"
+        tstd_path = output_dir / f"{basename}_Tstd.nii.gz"
+        if source_nifti is not None:
+            mean_img = nib.Nifti1Image(
+                mean_save.astype(np.float32),
+                source_nifti.affine,
+                source_nifti.header,
+            )
+            std_img = nib.Nifti1Image(
+                std_save.astype(np.float32),
+                source_nifti.affine,
+                source_nifti.header,
+            )
+        else:
+            affine = np.eye(4, dtype=np.float64)
+            mean_img = nib.Nifti1Image(mean_save.astype(np.float32), affine)
+            std_img = nib.Nifti1Image(std_save.astype(np.float32), affine)
+        nib.save(mean_img, str(tmean_path))
+        nib.save(std_img, str(tstd_path))
+        optional_paths = [tmean_path, tstd_path]
     payload: Dict[str, Any] = {
         "input_file": str(input_path),
         "input_type": input_type,
@@ -312,10 +715,12 @@ def save_outputs(
         **summarize(selected_values),
         "n_voxels_in_roi": int(selected_values.size),
         "map_affine_source": map_affine_source,
+        "output_map_censoring": output_map_censoring,
+        "timepoint_selection": timepoint_selection,
         "parameters": parameters,
     }
     stats_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return map_path, stats_path
+    return map_path, stats_path, optional_paths
 
 
 def run_analysis(
@@ -326,7 +731,11 @@ def run_analysis(
     slice_index: Optional[int] = None,
     threshold: float = 0.25,
     erosion_voxels: int = 2,
-) -> Tuple[Path, Path]:
+    write_tmean_tstd: bool = False,
+    first_timepoint: int = 1,
+    last_timepoint: Optional[int] = None,
+    mask_maps: bool = True,
+) -> Tuple[Path, Path, List[Path]]:
     """Run full tSNR analysis and write outputs.
 
     Args:
@@ -335,11 +744,23 @@ def run_analysis(
         output_dir (Optional[Path]): Destination directory.
         roi_size (int): Phantom ROI side.
         slice_index (Optional[int]): Phantom slice override.
-        threshold (float): Brain threshold.
-        erosion_voxels (int): Brain erosion iterations.
+        threshold (float): Brain threshold (used for the intensity fallback and
+            recorded in JSON; when a T1-derived mask is used, it does not define that
+            mask).
+        erosion_voxels (int): Brain erosion iterations (same as ``threshold`` for
+            fallback vs metadata).
+        write_tmean_tstd (bool): When True, write optional `{basename}_Tmean.nii.gz`
+            and `{basename}_Tstd.nii.gz` maps for troubleshooting (off by default).
+        first_timepoint (int): 0-based index of the first volume to include. Default
+            ``1`` skips the first volume (legacy-style ``2..-`` steady-state behavior).
+            Use ``0`` to include all volumes from the start of the series.
+        last_timepoint (Optional[int]): 0-based index of the last volume to include,
+            or ``None`` for the final volume in the file.
+        mask_maps (bool): When True (default), set NIfTI map voxels outside the ROI
+            to NaN. Set False for full field-of-view maps.
 
     Returns:
-        Tuple[Path, Path]: `(map_path, stats_path)`.
+        Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_intermediate_paths)`.
 
     Raises:
         ValueError: If validation or processing fails.
@@ -361,13 +782,76 @@ def run_analysis(
     else:
         raise ValueError(f"Unsupported input extension: {input_path.name}")
 
-    mean_volume, _std_volume, tsnr_map = compute_tsnr_map(data_4d)
+    data_4d, timepoint_selection = apply_timepoint_selection(
+        data_4d,
+        first_index=first_timepoint,
+        last_index_inclusive=last_timepoint,
+    )
+    mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
+    target_dir = output_dir if output_dir is not None else input_path.parent
+    brain_mask_override: Optional[np.ndarray] = None
+
     if mode == "phantom":
         selected_values, parameters = extract_phantom_tsnr(tsnr_map, mean_volume, roi_size, slice_index)
     else:
-        selected_values, parameters = extract_brain_tsnr(tsnr_map, mean_volume, threshold, erosion_voxels)
+        if source_nifti is not None:
+            t1_path = find_t1_in_anat(input_path)
+            if t1_path is None:
+                print(
+                    "WARNING: No T1 found in anat/ (or BET pipeline failed) "
+                    "— falling back to intensity thresholding",
+                    file=sys.stderr,
+                )
+                selected_values, parameters = extract_brain_tsnr(
+                    tsnr_map,
+                    mean_volume,
+                    threshold,
+                    erosion_voxels,
+                    brain_masking_report=_brain_masking_fallback_no_t1(),
+                )
+            else:
+                work_dir = target_dir / ".tsnr_fsl_work"
+                try:
+                    mask_path = create_bet_mask_for_func(
+                        t1_path,
+                        mean_volume,
+                        source_nifti,
+                        work_dir,
+                    )
+                    mask_img = nib.load(str(mask_path))
+                    mask_data = np.asarray(mask_img.get_fdata(dtype=np.float64))
+                    brain_mask_override = mask_data > 0.5
+                    selected_values, parameters = extract_brain_tsnr(
+                        tsnr_map,
+                        mean_volume,
+                        threshold,
+                        erosion_voxels,
+                        brain_mask=brain_mask_override,
+                        brain_masking_report=_brain_masking_success(t1_path),
+                    )
+                except (OSError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as exc:
+                    brain_mask_override = None
+                    print(
+                        "WARNING: No T1 found in anat/ (or BET pipeline failed) "
+                        "— falling back to intensity thresholding",
+                        file=sys.stderr,
+                    )
+                    selected_values, parameters = extract_brain_tsnr(
+                        tsnr_map,
+                        mean_volume,
+                        threshold,
+                        erosion_voxels,
+                        brain_masking_report=_brain_masking_fallback_pipeline_failed(t1_path, exc),
+                    )
+        else:
+            selected_values, parameters = extract_brain_tsnr(
+                tsnr_map,
+                mean_volume,
+                threshold,
+                erosion_voxels,
+                brain_masking_report=_brain_masking_fallback_no_nifti_header(),
+            )
 
-    target_dir = output_dir if output_dir is not None else input_path.parent
     return save_outputs(
         input_path=input_path,
         output_dir=target_dir,
@@ -375,9 +859,15 @@ def run_analysis(
         mode=mode,
         data_4d=data_4d,
         tsnr_map=tsnr_map,
+        mean_volume=mean_volume,
+        std_volume=std_volume,
         selected_values=selected_values,
         parameters=parameters,
+        timepoint_selection=timepoint_selection,
         source_nifti=source_nifti,
+        write_tmean_tstd=write_tmean_tstd,
+        mask_maps=mask_maps,
+        brain_mask_override=brain_mask_override,
     )
 
 
@@ -395,6 +885,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slice-index", type=int, default=None, help="Phantom slice index (default: middle)")
     parser.add_argument("--threshold", type=float, default=0.25, help="Brain threshold fraction")
     parser.add_argument("--erosion-voxels", type=int, default=2, help="Brain erosion iterations")
+    parser.add_argument(
+        "--write-tmean-tstd",
+        action="store_true",
+        help="Also write temporal mean/std volumes as {basename}_Tmean.nii.gz and "
+        "{basename}_Tstd.nii.gz (optional troubleshooting; matches legacy naming)",
+    )
+    parser.add_argument(
+        "--first-timepoint",
+        type=int,
+        default=1,
+        metavar="IDX",
+        help="0-based index of first volume to include (default: 1 skips the first "
+        "volume, like legacy 2..- on the time axis)",
+    )
+    parser.add_argument(
+        "--last-timepoint",
+        type=int,
+        default=None,
+        metavar="IDX",
+        help="0-based index of last volume to include (default: last volume in file)",
+    )
+    parser.add_argument(
+        "--full-fov-maps",
+        action="store_true",
+        help="Write tSNR/Tmean/Tstd NIfTIs for the full field of view (do not NaN "
+        "voxels outside the brain mask or phantom ROI)",
+    )
     return parser
 
 
@@ -417,8 +934,16 @@ def cli(argv: Optional[list[str]] = None) -> int:
             slice_index=args.slice_index,
             threshold=args.threshold,
             erosion_voxels=args.erosion_voxels,
+            write_tmean_tstd=args.write_tmean_tstd,
+            first_timepoint=args.first_timepoint,
+            last_timepoint=args.last_timepoint,
+            mask_maps=not args.full_fov_maps,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

@@ -1,6 +1,7 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+.DS_Store
 build/
 dist/
 wheels/
@@ -14,4 +15,3 @@ simple-tSNR/
 
 # Local notes/spec variants not for tracking
 New_comparison.md
-tSNR_SPEC.md
