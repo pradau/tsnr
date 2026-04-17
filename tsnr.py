@@ -2,11 +2,11 @@
 # Date: 2026-04-16
 # Compute raw tSNR maps and summary statistics for phantom and brain fMRI inputs.
 # Dependencies: Python 3.10+, nibabel, numpy, scipy; optional FSL (brain T1 mask)
-# Usage: uv run python tsnr.py /path/to/input.nii.gz phantom
-#        uv run python tsnr.py /path/to/input.nii.gz brain --threshold 0.25 --erosion-voxels 2
-#        uv run python tsnr.py /path/to/cache.npz phantom --roi-size 15
-#        uv run python tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
-#        uv run python tsnr.py /path/to/input.nii.gz phantom --first-timepoint 0
+# Usage: uv run tsnr.py /path/to/input.nii.gz phantom
+#        uv run tsnr.py /path/to/input.nii.gz brain --threshold 0.25 --erosion-voxels 2
+#        uv run tsnr.py /path/to/cache.npz phantom --roi-size 15
+#        uv run tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
+#        uv run tsnr.py /path/to/input.nii.gz phantom --first-timepoint 0
 
 """tSNR calculation helpers and CLI orchestration."""
 
@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,161 @@ def fsl_dir() -> Path:
     return Path(os.environ.get("FSLDIR", "/Users/pradau/fsl"))
 
 
+def _bids_json_sidecar_for_nifti(nifti_path: Path) -> Path:
+    """Return the BIDS companion ``.json`` path for a NIfTI file.
+
+    Args:
+        nifti_path (Path): Path ending in ``.nii`` or ``.nii.gz``.
+
+    Returns:
+        Path: Sidecar path with the same basename stem (BIDS convention).
+    """
+    name = nifti_path.name
+    if name.endswith(".nii.gz"):
+        return nifti_path.with_name(name[: -len(".nii.gz")] + ".json")
+    if name.endswith(".nii"):
+        return nifti_path.with_name(name[: -len(".nii")] + ".json")
+    return nifti_path.with_suffix(".json")
+
+
+def _parse_bids_date_string(value: object) -> Optional[date]:
+    """Parse BIDS ``AcquisitionDate`` (YYYY-MM-DD or YYYYMMDD).
+
+    Args:
+        value (object): Raw JSON value.
+
+    Returns:
+        Optional[date]: Parsed calendar date, or ``None``.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    if len(s) == 8 and s.isdigit():
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _parse_bids_time_string(value: object) -> Optional[time]:
+    """Parse BIDS ``AcquisitionTime`` (e.g. ``HH:MM:SS`` or ``H:M:S.fraction``).
+
+    Args:
+        value (object): Raw JSON value.
+
+    Returns:
+        Optional[time]: Parsed clock time, or ``None``.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    if s.isdigit() and len(s) == 6:
+        return time(int(s[:2]), int(s[2:4]), int(s[4:6]))
+    parts = s.split(":")
+    if len(parts) < 3:
+        return None
+    h = int(parts[0])
+    m = int(parts[1])
+    sec_rest = parts[2]
+    if "." in sec_rest:
+        sec_str, frac = sec_rest.split(".", 1)
+        sec = int(sec_str)
+        micro = int((float("0." + frac) * 1_000_000))
+    else:
+        sec = int(sec_rest)
+        micro = 0
+    return time(h, m, sec, micro)
+
+
+def _parse_acquisition_datetime_from_sidecar(json_path: Path) -> Optional[datetime]:
+    """Best-effort acquisition instant from a BIDS sidecar JSON.
+
+    Uses ``AcquisitionDateTime`` when present; otherwise combines
+    ``AcquisitionDate`` and ``AcquisitionTime`` when both parse.
+
+    Args:
+        json_path (Path): Path to a ``.json`` sidecar.
+
+    Returns:
+        Optional[datetime]: Timezone-naive UTC-ish local acquisition time, or
+        ``None`` if nothing usable was found.
+    """
+    if not json_path.is_file():
+        return None
+    try:
+        text = json_path.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    adt = data.get("AcquisitionDateTime")
+    if isinstance(adt, str) and adt.strip():
+        s = adt.strip()
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(s)
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            pass
+
+    d = _parse_bids_date_string(data.get("AcquisitionDate"))
+    t = _parse_bids_time_string(data.get("AcquisitionTime"))
+    if d is not None and t is not None:
+        return datetime.combine(d, t)
+    return None
+
+
+def _t1w_sort_key(nifti_path: Path) -> Tuple[int, float, str]:
+    """Sort key: earliest acquisition first; JSON-based times beat file mtime.
+
+    Args:
+        nifti_path (Path): Candidate ``*T1w.nii`` file under ``anat/``.
+
+    Returns:
+        Tuple[int, float, str]: ``(0, timestamp, name)`` when a sidecar time was
+        parsed, else ``(1, mtime, name)`` for mtime fallback.
+    """
+    jp = _bids_json_sidecar_for_nifti(nifti_path)
+    dt = _parse_acquisition_datetime_from_sidecar(jp)
+    if dt is not None:
+        return (0, dt.timestamp(), nifti_path.name)
+    try:
+        mtime = float(nifti_path.stat().st_mtime)
+    except OSError:
+        mtime = float("inf")
+    return (1, mtime, nifti_path.name)
+
+
+def _list_t1w_niftis_in_anat(anat_dir: Path) -> List[Path]:
+    """Collect ``*T1w.nii`` and ``*T1w.nii.gz`` files (no duplicates).
+
+    Args:
+        anat_dir (Path): BIDS ``anat`` directory.
+
+    Returns:
+        List[Path]: Sorted list of T1w NIfTI paths (deterministic order before
+        acquisition-time sort).
+    """
+    seen: set[Path] = set()
+    out: List[Path] = []
+    for pattern in ("*T1w.nii.gz", "*T1w.nii"):
+        for p in anat_dir.glob(pattern):
+            if not p.is_file():
+                continue
+            resolved = p.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(p)
+    return out
+
+
 def find_t1_in_anat(func_input_path: Path) -> Optional[Path]:
     """Locate a T1-weighted NIfTI under BIDS-style ``anat/`` next to ``func/``.
 
@@ -43,20 +199,28 @@ def find_t1_in_anat(func_input_path: Path) -> Optional[Path]:
        ``.../<subject|session>/func/``.
     2. ``func_input_path.parent / "anat"`` for flat or custom layouts.
 
+    In each existing ``anat`` directory, considers only files matching BIDS-style
+    ``*T1w.nii.gz`` and ``*T1w.nii``. If several exist, chooses the one with the
+    earliest acquisition timestamp from the matching ``.json`` sidecar
+    (``AcquisitionDateTime``, or ``AcquisitionDate`` + ``AcquisitionTime``). If
+    no sidecar time is available for a candidate, its file modification time is
+    used so the earliest file still wins among those without JSON times.
+
     Args:
         func_input_path (Path): Path to the 4D functional NIfTI.
 
     Returns:
-        Optional[Path]: First ``*.nii*`` file found in the first existing
-        ``anat`` directory (sorted for deterministic choice), or ``None``.
+        Optional[Path]: Selected T1w NIfTI, or ``None`` if none match.
     """
-    candidates = (func_input_path.parent.parent / "anat", func_input_path.parent / "anat")
-    for anat_dir in candidates:
+    candidates_dirs = (func_input_path.parent.parent / "anat", func_input_path.parent / "anat")
+    for anat_dir in candidates_dirs:
         if not anat_dir.is_dir():
             continue
-        matches = sorted(anat_dir.glob("*.nii*"))
-        if matches:
-            return matches[0]
+        t1w_list = _list_t1w_niftis_in_anat(anat_dir)
+        if not t1w_list:
+            continue
+        t1w_list.sort(key=_t1w_sort_key)
+        return t1w_list[0]
     return None
 
 
@@ -96,8 +260,9 @@ def _brain_masking_fallback_no_t1() -> Dict[str, Any]:
         "t1_path": None,
         "t1_to_functional_pipeline": "not_attempted_no_t1",
         "detail": (
-            "No T1-weighted NIfTI found under anat/ (checked next to the functional "
-            "path and one level up for BIDS-style func/ layout)."
+            "No T1-weighted NIfTI matching *T1w.nii.gz or *T1w.nii found under anat/ "
+            "(checked next to the functional path and one level up for BIDS-style "
+            "func/ layout)."
         ),
     }
 
@@ -188,9 +353,11 @@ def create_bet_mask_for_func(
 
     _run_fsl_bash(fsl_root, f'bet "{t1_abs}" "{stem_t1}" -m -f 0.35 -R')
     _run_fsl_bash(fsl_root, f'bet "{mean_vol_path}" "{stem_mean}" -m')
-    t1_brain = Path(f"{stem_t1}_brain.nii.gz")
-    mean_brain = Path(f"{stem_mean}_brain.nii.gz")
-    t1_mask = Path(f"{stem_t1}_brain_mask.nii.gz")
+    # FSL ``bet`` writes ``<stem>.nii.gz`` (brain) and ``<stem>_mask.nii.gz``, not
+    # ``<stem>_brain.nii.gz`` (legacy naming from very old FSL versions).
+    t1_brain = stem_t1.with_suffix(".nii.gz")
+    mean_brain = stem_mean.with_suffix(".nii.gz")
+    t1_mask = stem_t1.with_name(f"{stem_t1.name}_mask.nii.gz")
     if not t1_brain.is_file() or not mean_brain.is_file() or not t1_mask.is_file():
         raise ValueError("BET did not produce expected outputs")
 
@@ -510,8 +677,12 @@ def extract_brain_tsnr(
     In ``brain`` mode, when ``brain_mask`` is ``None``, the mask is built from the
     temporal mean (threshold times positive-voxel baseline, then erosion). When
     ``brain_mask`` is set (for example from T1 BET + registration), that array is
-    used instead. ``threshold`` and ``erosion_voxels`` always record CLI values;
-    when ``brain_mask`` is set they do not define the spatial mask.
+    used instead.
+
+    JSON metadata: ``intensity_brain_mask`` (threshold and erosion) is written only
+    when the spatial mask was built from intensity rules. It is omitted when a
+    supplied mask array defined the ROI (for example T1-based BET), so stats do not
+    list unused CLI values as if they had driven masking.
 
     Args:
         tsnr_map (np.ndarray): 3D tSNR map.
@@ -543,10 +714,13 @@ def extract_brain_tsnr(
     if finite_values.size == 0:
         raise ValueError("brain mask contains zero valid voxels")
     params: Dict[str, Any] = {
-        "threshold": float(threshold),
-        "erosion_voxels": int(erosion_voxels),
         "mask_baseline_mean_positive_signal": baseline,
     }
+    if brain_mask is None:
+        params["intensity_brain_mask"] = {
+            "threshold": float(threshold),
+            "erosion_voxels": int(erosion_voxels),
+        }
     if brain_masking_report is not None:
         params["brain_masking"] = brain_masking_report
     return finite_values, params
@@ -655,10 +829,16 @@ def save_outputs(
             if brain_mask_override is not None:
                 spatial_mask = np.asarray(brain_mask_override, dtype=bool)
             else:
+                ib = parameters.get("intensity_brain_mask")
+                if not isinstance(ib, dict):
+                    raise ValueError(
+                        "brain mode without a T1 mask override requires "
+                        "parameters['intensity_brain_mask'] from intensity masking"
+                    )
                 spatial_mask = build_brain_mask(
                     mean_volume,
-                    float(parameters["threshold"]),
-                    int(parameters["erosion_voxels"]),
+                    float(ib["threshold"]),
+                    int(ib["erosion_voxels"]),
                 )
         elif mode == "phantom":
             spatial_mask = build_phantom_roi_mask(tsnr_map.shape, parameters)
@@ -945,5 +1125,14 @@ def cli(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+def main() -> int:
+    """Execute CLI and return exit code.
+
+    Returns:
+        int: CLI exit code.
+    """
+    return cli()
+
+
 if __name__ == "__main__":
-    raise SystemExit(cli())
+    raise SystemExit(main())

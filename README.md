@@ -5,14 +5,14 @@ Compute raw temporal signal-to-noise ratio (tSNR) from fMRI data with two modes:
 - `phantom`: fixed square ROI summary on one slice
 - `brain`: whole-brain masked summary from a 4D NIfTI
 
-Behavior and the stats JSON contract are documented in this file. Optional FSL-based T1 brain masking for `brain` mode is described under **Brain mode** below.
+Behavior and the stats JSON contract are documented below. Optional FSL-based T1 brain masking for `brain` mode is described under **Brain mode**.
 
 ## Quick Start
 
 ```bash
 uv sync --group dev
-uv run python tsnr.py /path/to/run.nii.gz phantom
-uv run python tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
+uv run tsnr.py /path/to/run.nii.gz phantom
+uv run tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
 uv run pytest
 ```
 
@@ -38,51 +38,59 @@ uv sync --group dev
 
 ## CLI Usage
 
-Run with:
+Entry point is **`tsnr.py`** in this directory. Run from the project root:
 
 ```bash
-uv run python tsnr.py <input> <mode> [options]
+uv run tsnr.py <input> <mode> [options]
 ```
+
+`uv` executes the script with the project environment. Equivalent forms include `uv run python tsnr.py` and `uv run python -m tsnr`.
 
 Examples:
 
 ```bash
-uv run python tsnr.py /path/to/run.nii.gz phantom
-uv run python tsnr.py /path/to/run.nii.gz phantom --roi-size 15 --slice-index 12
-uv run python tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
-uv run python tsnr.py /path/to/cache.npz phantom
-uv run python tsnr.py /path/to/run.nii.gz brain --full-fov-maps
+uv run tsnr.py /path/to/run.nii.gz phantom
+uv run tsnr.py /path/to/run.nii.gz phantom --roi-size 15 --slice-index 12
+uv run tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
+uv run tsnr.py /path/to/cache.npz phantom
+uv run tsnr.py /path/to/run.nii.gz brain --full-fov-maps
+uv run tsnr.py /path/to/run.nii.gz brain --write-tmean-tstd --output-dir /path/to/out
 ```
+
+Useful options:
+
+- `--first-timepoint` / `--last-timepoint`: 0-based volume range (default skips the first volume with `first-timepoint=1`, similar to legacy `2..-` on the time axis).
+- `--write-tmean-tstd`: also write temporal mean and standard deviation maps (`*_Tmean.nii.gz`, `*_Tstd.nii.gz`).
+- `--full-fov-maps`: do not NaN voxels outside the ROI in written maps.
 
 ## Inputs
 
 - NIfTI: `.nii` or `.nii.gz` (must be 4D, at least 2 time points)
-- NPZ: `fMRIQA` phantom cache (`.npz`) is supported only for `phantom` mode
+- NPZ: fMRIQA-style phantom cache (`.npz`) is supported only for `phantom` mode
 
 ## Outputs
 
-Outputs are written to `--output-dir` (or input directory by default):
+Outputs go to `--output-dir`, or to the input file’s directory if omitted:
 
 - `<basename>_tsnr_map.nii.gz`
 - `<basename>_tsnr_stats.json`
+- Optional: `<basename>_Tmean.nii.gz`, `<basename>_Tstd.nii.gz` when `--write-tmean-tstd` is set
 
-By default, `*_tsnr_map.nii.gz` and optional `*_Tmean.nii.gz` / `*_Tstd.nii.gz` voxels **outside** the analysis ROI (phantom patch or brain mask) are set to **NaN** so maps align with the JSON summary. Use `--full-fov-maps` to write the full field of view instead. The stats JSON includes `output_map_censoring` (`roi_masked` or `full_fov`).
+By default, map voxels **outside** the analysis ROI (phantom patch or brain mask) are set to **NaN** so maps match the JSON summary. Use `--full-fov-maps` for full field of view. The stats JSON includes `output_map_censoring` (`roi_masked` or `full_fov`).
 
-Basename behavior:
+Basename rules:
 
 - `file.nii` -> `file`
 - `file.nii.gz` -> `file`
 - `file.npz` -> `file`
 
-Stats JSON includes:
+### Stats JSON (common fields)
 
-- input metadata (`input_file`, `input_type`, `mode`)
-- shape/time info (`volume_shape`, `n_timepoints`)
-- summary stats (`tsnr_mean`, `tsnr_median`, `tsnr_std`, `tsnr_min`, `tsnr_max`)
-- voxel count (`n_voxels_in_roi`)
-- map affine source (`map_affine_source`)
-- map masking mode (`output_map_censoring`)
-- mode-specific `parameters` (see below; brain mode includes `brain_masking`)
+- Input metadata: `input_file`, `input_type`, `mode`
+- Shape and time: `volume_shape`, `n_timepoints`, `timepoint_selection`
+- Summary: `tsnr_mean`, `tsnr_median`, `tsnr_std`, `tsnr_min`, `tsnr_max`, `n_voxels_in_roi`
+- `map_affine_source`, `output_map_censoring`
+- Mode-specific `parameters` (see below)
 
 ## Mode Notes
 
@@ -94,53 +102,54 @@ Stats JSON includes:
 
 ### Brain mode
 
-Brain masking tries a **T1-based** pipeline first when a T1 NIfTI is found under `anat/` (see layout below). If that pipeline succeeds, the ROI is the T1 brain mask **registered to the mean functional image** (BET on T1, BET on mean EPI, FLIRT, inverse warp). Otherwise the tool **falls back** to an intensity mask and prints one warning to stderr.
+Brain masking tries a **T1-based** pipeline first when a suitable T1w NIfTI is found under `anat/` (see **T1 discovery**). If that pipeline succeeds, the ROI is the T1 brain mask **registered to the mean functional image** (BET on T1, BET on mean EPI, FLIRT, inverse warp). Otherwise the tool **falls back** to an intensity mask and prints a warning to stderr.
 
-**Intensity fallback** (used when no T1 is found or the T1 pipeline fails):
+**Intensity fallback** (no T1 found, or BET/registration failure):
 
-- baseline is mean signal over positive voxels in the temporal mean
-- cutoff is `threshold * baseline`
-- binary erosion (`--erosion-voxels`)
+- Baseline is the mean signal over positive voxels in the temporal mean
+- Cutoff is `threshold * baseline`, then binary erosion (`--erosion-voxels`)
 
-`parameters.threshold` and `parameters.erosion_voxels` always record CLI values. They define the mask only when `parameters.brain_masking.method` is `mean_intensity`.
+**T1 discovery (BIDS-friendly, not BIDS-exclusive)**
 
-**BIDS-style layout for T1 discovery:** the functional file is usually `.../<subject|session>/func/<run>_bold.nii.gz` and T1 is the first `*.nii*` under `.../<subject|session>/anat/`. If the bold file sits next to `anat/` instead, that directory is used.
+The tool looks for `anat/` in two places relative to the functional NIfTI:
 
-**`parameters.brain_masking` (brain mode JSON):**
+1. `parent.parent / "anat"` (typical: `.../ses-x/func/run.nii.gz` -> `.../ses-x/anat/`)
+2. `parent / "anat"` (flat layout: `.../folder/run.nii.gz` -> `.../folder/anat/`)
 
-- `method`: `t1_bet_registered_to_mean_epi` when the T1-derived mask was applied; `mean_intensity` when the ROI came from thresholding plus erosion (including all fallbacks).
-- `t1_path`: absolute path to the T1 used for BET, or `null` if none was found or used.
-- `t1_to_functional_pipeline`: `success` if the T1 mask was warped to functional space; `not_attempted_no_t1` if no T1 was found; `failed` if BET/FLIRT or mask loading failed; `not_attempted_no_nifti` only in unusual cases without spatial NIfTI metadata.
-- `detail`: `null` on success; otherwise a short explanation or error text (for example stderr from FSL when `failed`).
+Only files matching `*T1w.nii.gz` or `*T1w.nii` are candidates. If several exist, the one with the **earliest acquisition time** is chosen, using the sidecar JSON when possible:
+
+- `AcquisitionDateTime` (ISO 8601), or
+- `AcquisitionDate` plus `AcquisitionTime`
+
+If no usable time is in JSON for a file, its modification time is used so the **earliest** file still wins among those without sidecar times.
+
+If there is **no** `anat/` on those paths, or no `*T1w.nii*`, only the intensity mask is used (no BET).
+
+**`parameters` in brain mode**
+
+- `mask_baseline_mean_positive_signal`: mean over positive voxels in the temporal mean (descriptive).
+- `intensity_brain_mask`: present **only when** the spatial mask was built from intensity rules. It contains `threshold` and `erosion_voxels` actually used for that mask. Omitted when the mask came from the T1 pipeline (those CLI flags did not define the ROI).
+- `brain_masking`:
+  - `method`: `t1_bet_registered_to_mean_epi` or `mean_intensity`
+  - `t1_path`: absolute path to the T1 NIfTI used for BET when applicable, else `null`
+  - `t1_to_functional_pipeline`: `success`, `not_attempted_no_t1`, `failed`, or `not_attempted_no_nifti`
+  - `detail`: `null` on success; otherwise a short message or captured error text
 
 ## Validation Behavior
 
-The CLI fails with a nonzero exit for invalid inputs, including:
+The CLI exits nonzero for invalid inputs, including:
 
-- unsupported extensions
-- non-4D NIfTI inputs
+- Unsupported extensions
+- Non-4D NIfTI inputs
 - NPZ used with `brain` mode
-- invalid ROI/threshold/erosion arguments
-- empty ROI or empty brain mask after processing
-- non-finite input values
+- Invalid ROI, threshold, or erosion arguments
+- Empty ROI or empty brain mask after processing
+- Non-finite input values
 
 ## Testing
-
-Run all tests:
 
 ```bash
 uv run pytest
 ```
 
-Current acceptance tests cover:
-
-- NIfTI phantom and brain happy paths
-- zero-std handling
-- ROI boundary handling
-- invalid dimension errors
-- empty mask failures
-- NPZ phantom compatibility (v1/v2 cache versions)
-- `.nii.gz` output naming contract
-- JSON output contract fields
-- BIDS-style and flat-layout T1 discovery (`find_t1_in_anat`)
-- brain-mode `parameters.brain_masking` (fallback when no T1; mocked T1 pipeline failure)
+Coverage includes phantom and brain paths, T1 discovery and ordering, brain masking JSON, intensity-only parameters in stats, BET fallback when FSL steps fail, timepoint selection, and output naming.

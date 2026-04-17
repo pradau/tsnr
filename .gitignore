@@ -13,5 +13,9 @@ wheels/
 # Local legacy reference implementation and data
 simple-tSNR/
 
+# Local NIfTI inputs and script outputs (not versioned)
+data/
+output/
+
 # Local notes/spec variants not for tracking
 New_comparison.md

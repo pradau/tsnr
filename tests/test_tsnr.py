@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tsnr import compute_tsnr_map, find_t1_in_anat, run_analysis
+from tsnr import compute_tsnr_map, extract_brain_tsnr, find_t1_in_anat, run_analysis
 
 
 def write_nifti(path: Path, data: np.ndarray) -> None:
@@ -140,6 +140,71 @@ def test_find_t1_in_anat_prefers_grandparent_when_both_exist(tmp_path: Path) -> 
     assert find_t1_in_anat(bold) == t1_grand
 
 
+def test_find_t1_in_anat_earliest_sidecar_datetime(tmp_path: Path) -> None:
+    """When multiple *T1w.nii.gz exist, the earliest AcquisitionDateTime is chosen."""
+    ses = tmp_path / "ses-01"
+    func_dir = ses / "func"
+    anat_dir = ses / "anat"
+    func_dir.mkdir(parents=True)
+    anat_dir.mkdir(parents=True)
+    bold = func_dir / "sub-01_ses-01_task-rest_bold.nii.gz"
+    bold.write_bytes(b"")
+    later = anat_dir / "sub-01_ses-01_run-02_T1w.nii.gz"
+    earlier = anat_dir / "sub-01_ses-01_run-01_T1w.nii.gz"
+    later.write_bytes(b"")
+    earlier.write_bytes(b"")
+    (anat_dir / "sub-01_ses-01_run-02_T1w.json").write_text(
+        '{"AcquisitionDateTime": "2024-12-02T14:00:00"}',
+        encoding="utf-8",
+    )
+    (anat_dir / "sub-01_ses-01_run-01_T1w.json").write_text(
+        '{"AcquisitionDateTime": "2024-12-02T12:00:00"}',
+        encoding="utf-8",
+    )
+    assert find_t1_in_anat(bold) == earlier
+
+
+def test_extract_brain_tsnr_omits_intensity_block_when_mask_supplied() -> None:
+    """When a brain mask array is supplied, intensity_brain_mask is not in parameters."""
+    tsnr_map = np.ones((5, 5, 3), dtype=np.float64)
+    mean_volume = np.ones((5, 5, 3), dtype=np.float64) * 100.0
+    mask = np.zeros((5, 5, 3), dtype=bool)
+    mask[1:4, 1:4, 1] = True
+    _, params = extract_brain_tsnr(
+        tsnr_map,
+        mean_volume,
+        threshold=0.25,
+        erosion_voxels=2,
+        brain_mask=mask,
+        brain_masking_report={"method": "t1_bet_registered_to_mean_epi"},
+    )
+    assert "intensity_brain_mask" not in params
+    assert params["brain_masking"]["method"] == "t1_bet_registered_to_mean_epi"
+
+
+def test_find_t1_in_anat_fallback_mtime_when_no_sidecar_time(tmp_path: Path) -> None:
+    """Without usable JSON times, the earliest file mtime among T1w candidates wins."""
+    import os
+    import time
+
+    sub = tmp_path / "sub-01"
+    func_dir = sub / "func"
+    anat_dir = sub / "anat"
+    func_dir.mkdir(parents=True)
+    anat_dir.mkdir(parents=True)
+    bold = func_dir / "bold.nii.gz"
+    bold.write_bytes(b"")
+    older = anat_dir / "sub-01_acq-A_T1w.nii.gz"
+    newer = anat_dir / "sub-01_acq-B_T1w.nii.gz"
+    older.write_bytes(b"x")
+    newer.write_bytes(b"y")
+    old_stamp = time.time() - 10_000.0
+    os.utime(older, (old_stamp, old_stamp))
+    new_stamp = time.time()
+    os.utime(newer, (new_stamp, new_stamp))
+    assert find_t1_in_anat(bold) == older
+
+
 def test_nifti_brain_happy_path(tmp_path: Path) -> None:
     """Brain analysis uses positive-voxel baseline and erosion."""
     data = np.zeros((9, 9, 5, 6), dtype=np.float64)
@@ -160,7 +225,8 @@ def test_nifti_brain_happy_path(tmp_path: Path) -> None:
     assert stats["mode"] == "brain"
     assert stats["n_voxels_in_roi"] > 0
     assert params["mask_baseline_mean_positive_signal"] > 0.0
-    assert params["erosion_voxels"] == 1
+    assert params["intensity_brain_mask"]["erosion_voxels"] == 1
+    assert params["intensity_brain_mask"]["threshold"] == 0.25
     bm = params["brain_masking"]
     assert bm["method"] == "mean_intensity"
     assert bm["t1_to_functional_pipeline"] == "not_attempted_no_t1"
