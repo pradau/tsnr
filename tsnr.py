@@ -538,14 +538,90 @@ def load_phantom_npz_4d(input_path: Path) -> np.ndarray:
         if "volume" not in data:
             raise ValueError("Unsupported pixel cache: missing volume")
         volume = np.asarray(data["volume"], dtype=np.float64)
+    return fmriqa_volume_to_data_4d(volume)
+
+
+def fmriqa_volume_to_data_4d(volume: np.ndarray) -> np.ndarray:
+    """Convert fMRIQA pixel cache volume to ``(x, y, z, t)`` layout used by this module.
+
+    Args:
+        volume (np.ndarray): Array shaped ``(n_slices, n_times, n_rows, n_cols)`` (fMRIQA cache).
+
+    Returns:
+        np.ndarray: Array shaped ``(x, y, z, t)`` in float64 (same convention as ``load_phantom_npz_4d``).
+
+    Raises:
+        ValueError: If shape is invalid, fewer than two time points, or values are non-finite.
+    """
     if volume.ndim != 4:
-        raise ValueError(f"Expected NPZ volume shape (slices, time, rows, cols), got {volume.shape}")
+        raise ValueError(
+            f"Expected NPZ volume shape (slices, time, rows, cols), got {volume.shape}"
+        )
     if volume.shape[1] < 2:
         raise ValueError(f"Need at least 2 time points, got {volume.shape[1]}")
     if not np.all(np.isfinite(volume)):
         raise ValueError("Input contains non-finite values")
-    data_4d = np.transpose(volume, (2, 3, 0, 1))
-    return data_4d
+    return np.transpose(volume, (2, 3, 0, 1))
+
+
+def run_phantom_analysis_from_4d(
+    data_4d: np.ndarray,
+    *,
+    roi_size: int = 15,
+    slice_index: Optional[int] = None,
+    first_timepoint: int = 1,
+    last_timepoint: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Phantom-mode tSNR map, ROI extraction, and summary statistics from 4D data.
+
+    Applies the same timepoint selection, voxel-wise tSNR map, phantom ROI placement,
+    and ``summarize`` logic as :func:`run_analysis` in ``phantom`` mode.
+
+    Args:
+        data_4d (np.ndarray): Full ``(x, y, z, t)`` volume before timepoint selection.
+        roi_size (int): Odd positive phantom ROI edge length in pixels.
+        slice_index (Optional[int]): Z slice index, or ``None`` for middle slice.
+        first_timepoint (int): 0-based first time index to include (default ``1`` drops first volume).
+        last_timepoint (Optional[int]): 0-based last time index inclusive, or ``None`` for end.
+
+    Returns:
+        Dict[str, Any]: Keys include ``data_4d`` (after time trim), ``mean_volume``, ``std_volume``,
+        ``tsnr_map``, ``selected_values``, ``parameters``, ``timepoint_selection``, ``summary``
+        (spatial tSNR plus ``ftsnr`` and ``roi_mean_signal_std`` from the ROI mean time
+        course),
+        ``n_voxels_in_roi``, ``n_timepoints``, ``volume_shape`` (list of int).
+
+    Raises:
+        ValueError: If ``data_4d`` is invalid or analysis fails.
+    """
+    if data_4d.ndim != 4:
+        raise ValueError(f"Expected 4D array (x, y, z, t), got shape {data_4d.shape}")
+    if data_4d.shape[3] < 2:
+        raise ValueError(f"Need at least 2 time points, got {data_4d.shape[3]}")
+    if not np.all(np.isfinite(data_4d)):
+        raise ValueError("Input contains non-finite values")
+    data_4d, timepoint_selection = apply_timepoint_selection(
+        data_4d,
+        first_index=first_timepoint,
+        last_index_inclusive=last_timepoint,
+    )
+    mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
+    selected_values, parameters = extract_phantom_tsnr(tsnr_map, mean_volume, roi_size, slice_index)
+    roi_mask = build_phantom_roi_mask(data_4d.shape[:3], parameters)
+    summary = {**summarize(selected_values), **compute_ftsnr_metrics(data_4d, roi_mask)}
+    return {
+        "data_4d": data_4d,
+        "mean_volume": mean_volume,
+        "std_volume": std_volume,
+        "tsnr_map": tsnr_map,
+        "selected_values": selected_values,
+        "parameters": parameters,
+        "timepoint_selection": timepoint_selection,
+        "summary": summary,
+        "n_voxels_in_roi": int(selected_values.size),
+        "n_timepoints": int(data_4d.shape[3]),
+        "volume_shape": [int(x) for x in data_4d.shape],
+    }
 
 
 def compute_tsnr_map(data_4d: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -745,6 +821,67 @@ def summarize(values: np.ndarray) -> Dict[str, float]:
     }
 
 
+def compute_ftsnr_metrics(data_4d: np.ndarray, roi_mask: np.ndarray) -> Dict[str, float]:
+    """Temporal ftSNR from the spatially averaged ROI signal across time.
+    Args:
+        data_4d (np.ndarray): Shape ``(x, y, z, t)`` after timepoint selection.
+        roi_mask (np.ndarray): Boolean mask shaped ``(x, y, z)``.
+    Returns:
+        Dict[str, float]: ``ftsnr`` (mean of ROI-mean series / its std) and
+        ``roi_mean_signal_std`` (std of ROI-mean series, signal units). Zeros when
+        temporal std is zero, matching voxelwise tSNR degenerate handling.
+    """
+    roi_ts = data_4d[roi_mask]
+    if roi_ts.size == 0:
+        return {"ftsnr": 0.0, "roi_mean_signal_std": 0.0}
+    roi_mean_series = np.mean(roi_ts, axis=0)
+    roi_mean_signal_std = float(np.std(roi_mean_series, ddof=0))
+    if not np.isfinite(roi_mean_signal_std) or roi_mean_signal_std <= 0.0:
+        return {"ftsnr": 0.0, "roi_mean_signal_std": 0.0}
+    ftsnr = float(np.mean(roi_mean_series) / roi_mean_signal_std)
+    if not np.isfinite(ftsnr):
+        return {"ftsnr": 0.0, "roi_mean_signal_std": roi_mean_signal_std}
+    return {"ftsnr": ftsnr, "roi_mean_signal_std": roi_mean_signal_std}
+
+
+def _analysis_roi_mask_for_summary(
+    mode: str,
+    volume_shape_3d: Tuple[int, int, int],
+    mean_volume: np.ndarray,
+    parameters: Dict[str, Any],
+    brain_mask_override: Optional[np.ndarray],
+) -> np.ndarray:
+    """Same 3D ROI mask used for JSON summaries and optional map censoring.
+    Args:
+        mode (str): ``phantom`` or ``brain``.
+        volume_shape_3d (Tuple[int, int, int]): Spatial shape of 3D maps.
+        mean_volume (np.ndarray): 3D temporal mean (brain intensity mask path).
+        parameters (Dict[str, Any]): Mode-specific parameters dict.
+        brain_mask_override (Optional[np.ndarray]): T1-registered mask when set.
+    Returns:
+        np.ndarray: Boolean mask shaped ``volume_shape_3d``.
+    Raises:
+        ValueError: Brain mode without override and without intensity mask params.
+    """
+    if mode == "brain":
+        if brain_mask_override is not None:
+            return np.asarray(brain_mask_override, dtype=bool)
+        ib = parameters.get("intensity_brain_mask")
+        if not isinstance(ib, dict):
+            raise ValueError(
+                "brain mode without a T1 mask override requires "
+                "parameters['intensity_brain_mask'] from intensity masking"
+            )
+        return build_brain_mask(
+            mean_volume,
+            float(ib["threshold"]),
+            int(ib["erosion_voxels"]),
+        )
+    if mode == "phantom":
+        return build_phantom_roi_mask(volume_shape_3d, parameters)
+    return np.ones(volume_shape_3d, dtype=bool)
+
+
 def apply_spatial_mask_nan(
     tsnr_map: np.ndarray,
     mean_volume: np.ndarray,
@@ -816,35 +953,25 @@ def save_outputs(
     map_path = output_dir / f"{basename}_tsnr_map.nii.gz"
     stats_path = output_dir / f"{basename}_tsnr_stats.json"
 
+    analysis_roi_mask = _analysis_roi_mask_for_summary(
+        mode,
+        tsnr_map.shape,
+        mean_volume,
+        parameters,
+        brain_mask_override,
+    )
+    ft_metrics = compute_ftsnr_metrics(data_4d, analysis_roi_mask)
+
     output_map_censoring = "full_fov"
     tsnr_save = tsnr_map
     mean_save = mean_volume
     std_save = std_volume
     if mask_maps:
-        if mode == "brain":
-            if brain_mask_override is not None:
-                spatial_mask = np.asarray(brain_mask_override, dtype=bool)
-            else:
-                ib = parameters.get("intensity_brain_mask")
-                if not isinstance(ib, dict):
-                    raise ValueError(
-                        "brain mode without a T1 mask override requires "
-                        "parameters['intensity_brain_mask'] from intensity masking"
-                    )
-                spatial_mask = build_brain_mask(
-                    mean_volume,
-                    float(ib["threshold"]),
-                    int(ib["erosion_voxels"]),
-                )
-        elif mode == "phantom":
-            spatial_mask = build_phantom_roi_mask(tsnr_map.shape, parameters)
-        else:
-            spatial_mask = np.ones(tsnr_map.shape, dtype=bool)
         tsnr_save, mean_save, std_save = apply_spatial_mask_nan(
             tsnr_map,
             mean_volume,
             std_volume,
-            spatial_mask,
+            analysis_roi_mask,
         )
         output_map_censoring = "roi_masked"
 
@@ -889,6 +1016,7 @@ def save_outputs(
         "n_timepoints": int(data_4d.shape[3]),
         "volume_shape": [int(x) for x in data_4d.shape],
         **summarize(selected_values),
+        **ft_metrics,
         "n_voxels_in_roi": int(selected_values.size),
         "map_affine_source": map_affine_source,
         "output_map_censoring": output_map_censoring,
@@ -957,18 +1085,31 @@ def run_analysis(
     else:
         raise ValueError(f"Unsupported input extension: {input_path.name}")
 
-    data_4d, timepoint_selection = apply_timepoint_selection(
-        data_4d,
-        first_index=first_timepoint,
-        last_index_inclusive=last_timepoint,
-    )
-    mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
     target_dir = output_dir if output_dir is not None else default_output_dir_for_input(input_path)
     brain_mask_override: Optional[np.ndarray] = None
 
     if mode == "phantom":
-        selected_values, parameters = extract_phantom_tsnr(tsnr_map, mean_volume, roi_size, slice_index)
+        pa = run_phantom_analysis_from_4d(
+            data_4d,
+            roi_size=roi_size,
+            slice_index=slice_index,
+            first_timepoint=first_timepoint,
+            last_timepoint=last_timepoint,
+        )
+        data_4d = pa["data_4d"]
+        mean_volume = pa["mean_volume"]
+        std_volume = pa["std_volume"]
+        tsnr_map = pa["tsnr_map"]
+        selected_values = pa["selected_values"]
+        parameters = pa["parameters"]
+        timepoint_selection = pa["timepoint_selection"]
     else:
+        data_4d, timepoint_selection = apply_timepoint_selection(
+            data_4d,
+            first_index=first_timepoint,
+            last_index_inclusive=last_timepoint,
+        )
+        mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
         if source_nifti is not None:
             t1_path = find_t1_in_anat(input_path)
             if t1_path is None:

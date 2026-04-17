@@ -108,7 +108,9 @@ Basename rules:
 
 - Input metadata: `input_file`, `input_type`, `mode`
 - Shape and time: `volume_shape`, `n_timepoints`, `timepoint_selection`
-- Summary: `tsnr_mean`, `tsnr_median`, `tsnr_std`, `tsnr_min`, `tsnr_max`, `n_voxels_in_roi`
+- Summary: `tsnr_mean`, `tsnr_median`, `tsnr_std`, `tsnr_min`, `tsnr_max`, `ftsnr`, `roi_mean_signal_std`, `n_voxels_in_roi`
+  - `tsnr_std` is the spatial standard deviation of per-voxel tSNR across the ROI.
+  - `roi_mean_signal_std` is the temporal standard deviation of the ROI-mean fMRI signal across frames (signal units, suitable for longitudinal plot error bars). `ftsnr` is the mean of that ROI-mean series divided by `roi_mean_signal_std`.
 - `map_affine_source`, `output_map_censoring`
 - Mode-specific `parameters` (see below)
 

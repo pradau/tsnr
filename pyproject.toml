@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "tsnr"
 version = "0.1.0"
@@ -9,6 +13,9 @@ dependencies = [
     "numpy>=2.2.6",
     "scipy>=1.15.3",
 ]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["tsnr.py"]
 
 [dependency-groups]
 dev = [

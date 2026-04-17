@@ -11,6 +11,7 @@ Acceptance tests for tSNR implementation.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -29,8 +30,10 @@ from tsnr import (
     default_output_dir_for_input,
     extract_brain_tsnr,
     find_t1_in_anat,
+    fmriqa_volume_to_data_4d,
     list_bold_niftis_in_dir,
     run_analysis,
+    run_phantom_analysis_from_4d,
 )
 
 
@@ -53,6 +56,15 @@ def load_stats(path: Path) -> Dict[str, object]:
         Dict[str, object]: Parsed payload.
     """
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def assert_ftsnr_positive_finite(stats: Dict[str, object]) -> None:
+    """Assert ftSNR fields exist and are finite positive (non-degenerate runs)."""
+    assert "ftsnr" in stats and "roi_mean_signal_std" in stats
+    fm = float(stats["ftsnr"])
+    fs = float(stats["roi_mean_signal_std"])
+    assert math.isfinite(fm) and math.isfinite(fs)
+    assert fm > 0.0 and fs > 0.0
 
 
 def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
@@ -101,6 +113,45 @@ def test_nifti_phantom_happy_path(tmp_path: Path) -> None:
     assert ts["last_index_inclusive"] == 7
     assert ts["n_timepoints_in_file"] == 8
     assert ts["n_timepoints_used"] == 7
+    assert_ftsnr_positive_finite(stats)
+    assert int(stats["n_voxels_in_roi"]) > 1
+    assert float(stats["ftsnr"]) > float(stats["tsnr_mean"])
+    assert float(stats["roi_mean_signal_std"]) > 1.0
+
+
+def test_fmriqa_volume_to_data_4d_matches_npz_transpose(tmp_path: Path) -> None:
+    """In-memory fMRIQA volume matches ``load_phantom_npz_4d`` layout."""
+    data = make_phantom_data((21, 21, 9, 8))
+    input_path = tmp_path / "phantom.nii.gz"
+    write_nifti(input_path, data)
+    from tsnr import load_phantom_npz_4d
+
+    from_npz = tmp_path / "cache.npz"
+    vol = np.transpose(data, (2, 3, 0, 1))
+    np.savez(from_npz, cache_version=2, volume=vol)
+    a = load_phantom_npz_4d(from_npz)
+    b = fmriqa_volume_to_data_4d(vol)
+    assert a.shape == b.shape == (21, 21, 9, 8)
+    np.testing.assert_array_equal(a, b)
+
+
+def test_run_phantom_analysis_from_4d_matches_run_analysis_npz(tmp_path: Path) -> None:
+    """Library API matches file-based phantom run on the same 4D data."""
+    data = make_phantom_data((21, 21, 9, 8))
+    from_npz = tmp_path / "cache.npz"
+    vol = np.transpose(data, (2, 3, 0, 1))
+    np.savez(from_npz, cache_version=2, volume=vol)
+    from tsnr import load_phantom_npz_4d
+
+    data_4d = load_phantom_npz_4d(from_npz)
+    pa = run_phantom_analysis_from_4d(data_4d, roi_size=15, slice_index=None, first_timepoint=1, last_timepoint=None)
+    _, stats_path, _ = run_analysis(from_npz, mode="phantom", output_dir=tmp_path)
+    stats = load_stats(stats_path)
+    assert pa["summary"]["tsnr_mean"] == pytest.approx(stats["tsnr_mean"])
+    assert pa["summary"]["tsnr_std"] == pytest.approx(stats["tsnr_std"])
+    assert pa["summary"]["ftsnr"] == pytest.approx(stats["ftsnr"])
+    assert pa["summary"]["roi_mean_signal_std"] == pytest.approx(stats["roi_mean_signal_std"])
+    assert pa["parameters"]["slice_index"] == stats["parameters"]["slice_index"]
 
 
 def test_find_t1_in_anat_bids_func_under_subject(tmp_path: Path) -> None:
@@ -353,6 +404,10 @@ def test_nifti_brain_happy_path(tmp_path: Path) -> None:
     assert bm["t1_to_functional_pipeline"] == "not_attempted_no_t1"
     assert bm["t1_path"] is None
     assert bm["detail"] is not None
+    assert_ftsnr_positive_finite(stats)
+    assert int(stats["n_voxels_in_roi"]) > 1
+    assert float(stats["ftsnr"]) > float(stats["tsnr_mean"])
+    assert float(stats["roi_mean_signal_std"]) > 1.0
 
 
 def test_brain_masking_json_when_t1_pipeline_fails(tmp_path: Path) -> None:
@@ -403,6 +458,8 @@ def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
     assert np.all(values == 0.0)
     stats = load_stats(stats_path)
     assert stats["tsnr_mean"] == 0.0
+    assert stats["ftsnr"] == 0.0
+    assert stats["roi_mean_signal_std"] == 0.0
 
 
 def test_phantom_roi_near_boundary_is_shifted(tmp_path: Path) -> None:
@@ -528,6 +585,7 @@ def test_json_contract_fields_present(tmp_path: Path) -> None:
     assert "brain_masking" not in stats["parameters"]
     assert stats["timepoint_selection"]["n_timepoints_used"] == 4
     assert stats["output_map_censoring"] == "roi_masked"
+    assert "ftsnr" in stats and "roi_mean_signal_std" in stats
 
 
 def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None:
@@ -551,6 +609,10 @@ def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None
     bm = stats["parameters"]["brain_masking"]
     for key in ("method", "t1_path", "t1_to_functional_pipeline", "detail"):
         assert key in bm
+    assert_ftsnr_positive_finite(stats)
+    assert int(stats["n_voxels_in_roi"]) > 1
+    assert float(stats["ftsnr"]) > float(stats["tsnr_mean"])
+    assert float(stats["roi_mean_signal_std"]) > 1.0
 
 
 def test_timepoint_all_volumes_explicit_first_zero(tmp_path: Path) -> None:
