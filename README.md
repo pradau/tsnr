@@ -1,5 +1,12 @@
 # tSNR Calculator
 
+Author: Perry Radau  
+Date: 2026-04-16  
+
+Purpose: Compute temporal signal-to-noise ratio (tSNR) maps and per-run JSON statistics from 4D fMRI. Phantom mode uses a fixed-slice ROI; brain mode summarizes within a brain mask (optional FSL-based registration from T1 when available).
+
+Dependencies: Python 3.10+; Python packages nibabel, numpy, and scipy (versions in [`pyproject.toml`](pyproject.toml)); [uv](https://docs.astral.sh/uv/) for installs; optional [FSL](https://fsl.fmrib.ox.ac.uk/fsl) for T1 brain masking in brain mode; pytest in the dev dependency group for tests.
+
 Compute raw temporal signal-to-noise ratio (tSNR) from fMRI data with two modes:
 
 - `phantom`: fixed square ROI summary on one slice
@@ -66,7 +73,7 @@ uv run tsnr.py /path/to/ses-x/func brain --output-dir /path/to/derivatives/tsnr
 
 Useful options:
 
-- `--first-timepoint` / `--last-timepoint`: 0-based volume range (default skips the first volume with `first-timepoint=1`, similar to legacy `2..-` on the time axis).
+- `--first-timepoint` / `--last-timepoint`: 0-based volume range. Default `first-timepoint=1` drops the first volume to reduce non-steady-state transient effects in fMRI signal (same idea as legacy `2..-` on the time axis). Use `--first-timepoint 0` to include the first volume.
 - `--write-tmean-tstd`: also write temporal mean and standard deviation maps (`*_Tmean.nii.gz`, `*_Tstd.nii.gz`).
 - `--full-fov-maps`: do not NaN voxels outside the ROI in written maps.
 - `--input-pattern`: when `input` is a directory, override the default `*_bold.nii.gz` / `*_bold.nii` discovery with one glob.

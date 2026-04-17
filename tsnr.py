@@ -9,7 +9,9 @@
 #        uv run tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
 #        uv run tsnr.py /path/to/input.nii.gz phantom --first-timepoint 0
 
-"""tSNR calculation helpers and CLI orchestration."""
+"""
+tSNR calculation helpers and CLI orchestration.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +32,8 @@ from scipy.ndimage import binary_erosion, center_of_mass
 def fsl_dir() -> Path:
     """Return FSL installation root from ``FSLDIR`` or a default path.
     Returns:
-        Path: Directory containing FSL (must include ``etc/fslconf/fsl.sh``)."""
+        Path: Directory containing FSL (must include ``etc/fslconf/fsl.sh``).
+    """
     return Path(os.environ.get("FSLDIR", "/Users/pradau/fsl"))
 
 
@@ -39,7 +42,8 @@ def _bids_json_sidecar_for_nifti(nifti_path: Path) -> Path:
     Args:
         nifti_path (Path): Path ending in ``.nii`` or ``.nii.gz``.
     Returns:
-        Path: Sidecar path with the same basename stem (BIDS convention)."""
+        Path: Sidecar path with the same basename stem (BIDS convention).
+    """
     name = nifti_path.name
     if name.endswith(".nii.gz"):
         return nifti_path.with_name(name[: -len(".nii.gz")] + ".json")
@@ -53,7 +57,8 @@ def _parse_bids_date_string(value: object) -> Optional[date]:
     Args:
         value (object): Raw JSON value.
     Returns:
-        Optional[date]: Parsed calendar date, or ``None``."""
+        Optional[date]: Parsed calendar date, or ``None``.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
     s = value.strip()
@@ -70,7 +75,8 @@ def _parse_bids_time_string(value: object) -> Optional[time]:
     Args:
         value (object): Raw JSON value.
     Returns:
-        Optional[time]: Parsed clock time, or ``None``."""
+        Optional[time]: Parsed clock time, or ``None``.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
     s = value.strip()
@@ -100,7 +106,8 @@ def _parse_acquisition_datetime_from_sidecar(json_path: Path) -> Optional[dateti
         json_path (Path): Path to a ``.json`` sidecar.
     Returns:
         Optional[datetime]: Timezone-naive UTC-ish local acquisition time, or
-        ``None`` if nothing usable was found."""
+        ``None`` if nothing usable was found.
+    """
     if not json_path.is_file():
         return None
     try:
@@ -137,7 +144,8 @@ def _t1w_sort_key(nifti_path: Path) -> Tuple[int, float, str]:
         nifti_path (Path): Candidate ``*T1w.nii`` file under ``anat/``.
     Returns:
         Tuple[int, float, str]: ``(0, timestamp, name)`` when a sidecar time was
-        parsed, else ``(1, mtime, name)`` for mtime fallback."""
+        parsed, else ``(1, mtime, name)`` for mtime fallback.
+    """
     jp = _bids_json_sidecar_for_nifti(nifti_path)
     dt = _parse_acquisition_datetime_from_sidecar(jp)
     if dt is not None:
@@ -155,7 +163,8 @@ def _list_t1w_niftis_in_anat(anat_dir: Path) -> List[Path]:
         anat_dir (Path): BIDS ``anat`` directory.
     Returns:
         List[Path]: Sorted list of T1w NIfTI paths (deterministic order before
-        acquisition-time sort)."""
+        acquisition-time sort).
+    """
     seen: set[Path] = set()
     out: List[Path] = []
     for pattern in ("*T1w.nii.gz", "*T1w.nii"):
@@ -185,7 +194,8 @@ def find_t1_in_anat(func_input_path: Path) -> Optional[Path]:
     Args:
         func_input_path (Path): Path to the 4D functional NIfTI.
     Returns:
-        Optional[Path]: Selected T1w NIfTI, or ``None`` if none match."""
+        Optional[Path]: Selected T1w NIfTI, or ``None`` if none match.
+    """
     candidates_dirs = (func_input_path.parent.parent / "anat", func_input_path.parent / "anat")
     for anat_dir in candidates_dirs:
         if not anat_dir.is_dir():
@@ -210,7 +220,8 @@ def list_bold_niftis_in_dir(directory: Path, pattern: Optional[str] = None) -> L
     Returns:
         List[Path]: Sorted, deduplicated file paths (lexicographic by basename).
     Raises:
-        ValueError: If ``directory`` is not an existing directory."""
+        ValueError: If ``directory`` is not an existing directory.
+    """
     if not directory.is_dir():
         raise ValueError(f"Not a directory or directory does not exist: {directory}")
     seen: set[Path] = set()
@@ -234,7 +245,8 @@ def _format_brain_pipeline_error(exc: BaseException) -> str:
     Args:
         exc (BaseException): Exception raised during BET, FLIRT, or mask loading.
     Returns:
-        str: Truncated, stderr-aware description for ``brain_masking.detail``."""
+        str: Truncated, stderr-aware description for ``brain_masking.detail``.
+    """
     if isinstance(exc, subprocess.CalledProcessError):
         parts = [f"FSL command failed with exit code {exc.returncode}"]
         if exc.stderr and exc.stderr.strip():
@@ -246,7 +258,9 @@ def _format_brain_pipeline_error(exc: BaseException) -> str:
 
 
 def _brain_masking_success(t1_path: Path) -> Dict[str, Any]:
-    """Build ``brain_masking`` JSON when the T1 BET plus FLIRT mask is used."""
+    """
+    Build ``brain_masking`` JSON when the T1 BET plus FLIRT mask is used.
+    """
     return {
         "method": "t1_bet_registered_to_mean_epi",
         "t1_path": str(t1_path.resolve()),
@@ -256,7 +270,9 @@ def _brain_masking_success(t1_path: Path) -> Dict[str, Any]:
 
 
 def _brain_masking_fallback_no_t1() -> Dict[str, Any]:
-    """Build ``brain_masking`` JSON when no T1 is found under ``anat/``."""
+    """
+    Build ``brain_masking`` JSON when no T1 is found under ``anat/``.
+    """
     return {
         "method": "mean_intensity",
         "t1_path": None,
@@ -270,7 +286,9 @@ def _brain_masking_fallback_no_t1() -> Dict[str, Any]:
 
 
 def _brain_masking_fallback_pipeline_failed(t1_path: Optional[Path], exc: BaseException) -> Dict[str, Any]:
-    """Build ``brain_masking`` JSON when BET or registration fails."""
+    """
+    Build ``brain_masking`` JSON when BET or registration fails.
+    """
     return {
         "method": "mean_intensity",
         "t1_path": str(t1_path.resolve()) if t1_path is not None else None,
@@ -280,7 +298,9 @@ def _brain_masking_fallback_pipeline_failed(t1_path: Optional[Path], exc: BaseEx
 
 
 def _brain_masking_fallback_no_nifti_header() -> Dict[str, Any]:
-    """Build ``brain_masking`` JSON for defensive brain path without spatial NIfTI."""
+    """
+    Build ``brain_masking`` JSON for defensive brain path without spatial NIfTI.
+    """
     return {
         "method": "mean_intensity",
         "t1_path": None,
@@ -296,7 +316,8 @@ def _run_fsl_bash(fsl_root: Path, command: str) -> None:
         command (str): Shell command(s) to run after ``fsl.sh`` is sourced.
     Raises:
         subprocess.CalledProcessError: If the command exits non-zero.
-        FileNotFoundError: If ``fsl.sh`` is missing."""
+        FileNotFoundError: If ``fsl.sh`` is missing.
+    """
     fsl_sh = fsl_root / "etc" / "fslconf" / "fsl.sh"
     if not fsl_sh.is_file():
         raise FileNotFoundError(f"FSL config not found: {fsl_sh}")
@@ -329,7 +350,8 @@ def create_bet_mask_for_func(
     Raises:
         ValueError: If output mask shape does not match ``mean_volume`` or mask is empty.
         subprocess.CalledProcessError: If an FSL tool fails.
-        FileNotFoundError: If FSL is not installed at ``fsl_dir()``."""
+        FileNotFoundError: If FSL is not installed at ``fsl_dir()``.
+    """
     if mean_volume.shape != tuple(source_nifti.shape[:3]):
         raise ValueError("mean_volume shape must match functional NIfTI spatial shape")
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -383,7 +405,8 @@ def derive_basename(input_path: Path) -> str:
     Args:
         input_path (Path): Input file path.
     Returns:
-        str: Basename with `.nii.gz` stripped as a unit when present."""
+        str: Basename with `.nii.gz` stripped as a unit when present.
+    """
     name = input_path.name
     if name.endswith(".nii.gz"):
         return name[: -len(".nii.gz")]
@@ -396,6 +419,8 @@ def apply_timepoint_selection(
     last_index_inclusive: Optional[int],
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     """Slice the time axis to match legacy-style volume ranges (for example `2..-`).
+    Default first index 1 drops the first volume to reduce non-steady-state transient
+    effects in fMRI signal.
     Args:
         data_4d (np.ndarray): Full `(x, y, z, t)` volume.
         first_index (int): 0-based index of the first timepoint to include.
@@ -406,7 +431,8 @@ def apply_timepoint_selection(
             (`first_index`, `last_index_inclusive`, `n_timepoints_in_file`,
             `n_timepoints_used`).
     Raises:
-        ValueError: If indices are out of range or fewer than two timepoints remain."""
+        ValueError: If indices are out of range or fewer than two timepoints remain.
+    """
     n_t = int(data_4d.shape[3])
     if first_index < 0:
         raise ValueError("--first-timepoint must be >= 0")
@@ -448,7 +474,8 @@ def validate_common_args(mode: str, threshold: float, erosion_voxels: int) -> No
         threshold (float): Brain threshold fraction.
         erosion_voxels (int): Brain erosion iterations.
     Raises:
-        ValueError: If any value is invalid."""
+        ValueError: If any value is invalid.
+    """
     if mode not in ("phantom", "brain"):
         raise ValueError(f"Invalid mode: {mode}")
     if not (0.0 < threshold < 1.0):
@@ -464,7 +491,8 @@ def load_nifti_4d(input_path: Path) -> Tuple[np.ndarray, nib.Nifti1Image]:
     Returns:
         Tuple[np.ndarray, nib.Nifti1Image]: Data array `(x, y, z, t)` and image object.
     Raises:
-        ValueError: If dimensionality or content is invalid."""
+        ValueError: If dimensionality or content is invalid.
+    """
     image = nib.load(str(input_path))
     data = np.asarray(image.get_fdata(dtype=np.float64), dtype=np.float64)
     if data.ndim != 4:
@@ -483,7 +511,8 @@ def load_phantom_npz_4d(input_path: Path) -> np.ndarray:
     Returns:
         np.ndarray: Array with shape `(x, y, z, t)` in float64.
     Raises:
-        ValueError: If cache version or volume shape is invalid."""
+        ValueError: If cache version or volume shape is invalid.
+    """
     with np.load(str(input_path), allow_pickle=True) as data:
         if "cache_version" not in data:
             raise ValueError("Unsupported pixel cache: missing cache_version")
@@ -508,7 +537,8 @@ def compute_tsnr_map(data_4d: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.nd
     Args:
         data_4d (np.ndarray): Input shape `(x, y, z, t)`.
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]: `(mean_volume, std_volume, tsnr_map)`."""
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: `(mean_volume, std_volume, tsnr_map)`.
+    """
     mean_volume = np.mean(data_4d, axis=3)
     std_volume = np.std(data_4d, axis=3, ddof=1)
     tsnr_map = np.zeros_like(mean_volume, dtype=np.float64)
@@ -529,7 +559,8 @@ def place_phantom_roi(
     Returns:
         Tuple[int, int, int, int]: `(row_start, row_end, col_start, col_end)`.
     Raises:
-        ValueError: If ROI cannot be placed."""
+        ValueError: If ROI cannot be placed.
+    """
     if roi_size < 1 or roi_size % 2 == 0:
         raise ValueError("--roi-size must be a positive odd integer")
     rows, cols = reference_slice.shape
@@ -564,7 +595,8 @@ def extract_phantom_tsnr(
     Returns:
         Tuple[np.ndarray, Dict[str, Any]]: ROI values and parameter metadata.
     Raises:
-        ValueError: If slice index or ROI extraction is invalid."""
+        ValueError: If slice index or ROI extraction is invalid.
+    """
     z_dim = tsnr_map.shape[2]
     target_slice = z_dim // 2 if slice_index is None else slice_index
     if not (0 <= target_slice < z_dim):
@@ -596,7 +628,8 @@ def build_brain_mask(
     Returns:
         np.ndarray: Boolean array shaped like ``mean_volume``.
     Raises:
-        ValueError: If there are no positive voxels to define a baseline."""
+        ValueError: If there are no positive voxels to define a baseline.
+    """
     positive = mean_volume > 0.0
     if not np.any(positive):
         raise ValueError("brain mask baseline could not be computed: no positive voxels")
@@ -614,7 +647,8 @@ def build_phantom_roi_mask(volume_shape: Tuple[int, int, int], params: Dict[str,
         params (Dict[str, Any]): Phantom ``parameters`` dict with ``roi_bounds`` and
             ``slice_index``.
     Returns:
-        np.ndarray: Boolean mask shaped ``volume_shape``."""
+        np.ndarray: Boolean mask shaped ``volume_shape``.
+    """
     row_start, row_end, col_start, col_end = params["roi_bounds"]
     z = int(params["slice_index"])
     mask = np.zeros(volume_shape, dtype=bool)
@@ -651,7 +685,8 @@ def extract_brain_tsnr(
     Returns:
         Tuple[np.ndarray, Dict[str, Any]]: Brain values and parameter metadata.
     Raises:
-        ValueError: If mask creation fails or is empty."""
+        ValueError: If mask creation fails or is empty.
+    """
     if brain_mask is None:
         mask = build_brain_mask(mean_volume, threshold, erosion_voxels)
     else:
@@ -683,7 +718,8 @@ def summarize(values: np.ndarray) -> Dict[str, float]:
     Args:
         values (np.ndarray): Selected finite tSNR values.
     Returns:
-        Dict[str, float]: Stats dictionary."""
+        Dict[str, float]: Stats dictionary.
+    """
     return {
         "tsnr_mean": float(np.mean(values)),
         "tsnr_median": float(np.median(values)),
@@ -706,7 +742,8 @@ def apply_spatial_mask_nan(
         std_volume (np.ndarray): 3D temporal std.
         mask (np.ndarray): Boolean mask, same shape as each volume.
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]: Masked copies as ``float32``."""
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: Masked copies as ``float32``.
+    """
     tsnr_out = tsnr_map.astype(np.float32, copy=True)
     mean_out = mean_volume.astype(np.float32, copy=True)
     std_out = std_volume.astype(np.float32, copy=True)
@@ -742,9 +779,8 @@ def save_outputs(
         mode (str): Analysis mode.
         data_4d (np.ndarray): Internal `(x, y, z, t)` data after timepoint selection.
         tsnr_map (np.ndarray): 3D tSNR map.
-        mean_volume (np.ndarray): 3D temporal mean (legacy-style `Tmean`).
-        std_volume (np.ndarray): 3D temporal standard deviation with `ddof=1`
-            (legacy-style `Tstd`).
+        mean_volume (np.ndarray): 3D temporal mean (`Tmean`).
+        std_volume (np.ndarray): 3D temporal standard deviation with `ddof=1` (`Tstd`).
         selected_values (np.ndarray): Values used for summary.
         parameters (Dict[str, Any]): Mode-specific parameters.
         timepoint_selection (Dict[str, int]): Indices and counts for the time axis.
@@ -757,7 +793,8 @@ def save_outputs(
             boolean mask (same shape as ``mean_volume``) to use instead of
             recomputing the intensity-based mask.
     Returns:
-        Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_map_paths)`."""
+        Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_map_paths)`.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     basename = derive_basename(input_path)
     map_path = output_dir / f"{basename}_tsnr_map.nii.gz"
@@ -874,8 +911,8 @@ def run_analysis(
         write_tmean_tstd (bool): When True, write optional `{basename}_Tmean.nii.gz`
             and `{basename}_Tstd.nii.gz` maps for troubleshooting (off by default).
         first_timepoint (int): 0-based index of the first volume to include. Default
-            ``1`` skips the first volume (legacy-style ``2..-`` steady-state behavior).
-            Use ``0`` to include all volumes from the start of the series.
+            ``1`` drops the first volume to reduce non-steady-state transient effects
+            in fMRI signal. Use ``0`` to include all volumes from the start of the series.
         last_timepoint (Optional[int]): 0-based index of the last volume to include,
             or ``None`` for the final volume in the file.
         mask_maps (bool): When True (default), set NIfTI map voxels outside the ROI
@@ -883,7 +920,8 @@ def run_analysis(
     Returns:
         Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_intermediate_paths)`.
     Raises:
-        ValueError: If validation or processing fails."""
+        ValueError: If validation or processing fails.
+    """
     validate_common_args(mode, threshold, erosion_voxels)
     if not input_path.is_file():
         raise ValueError(f"Input does not exist: {input_path}")
@@ -917,7 +955,7 @@ def run_analysis(
             t1_path = find_t1_in_anat(input_path)
             if t1_path is None:
                 print(
-                    "WARNING: No T1 found in anat/ (or BET pipeline failed) "
+                    "WARNING: No T1w found in anat/ (or BET pipeline failed) "
                     "— falling back to intensity thresholding",
                     file=sys.stderr,
                 )
@@ -951,7 +989,7 @@ def run_analysis(
                 except (OSError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as exc:
                     brain_mask_override = None
                     print(
-                        "WARNING: No T1 found in anat/ (or BET pipeline failed) "
+                        "WARNING: No T1w found in anat/ (or BET pipeline failed) "
                         "— falling back to intensity thresholding",
                         file=sys.stderr,
                     )
@@ -993,7 +1031,8 @@ def run_analysis(
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build CLI parser.
     Returns:
-        argparse.ArgumentParser: Configured parser."""
+        argparse.ArgumentParser: Configured parser.
+    """
     parser = argparse.ArgumentParser(description="Compute raw fMRI tSNR map and summary statistics.")
     parser.add_argument(
         "input",
@@ -1017,8 +1056,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         metavar="IDX",
-        help="0-based index of first volume to include (default: 1 skips the first "
-        "volume, like legacy 2..- on the time axis)",
+        help=(
+            "0-based index of first volume to include (default: 1 drops the first "
+            "volume to reduce non-steady-state transient effects in fMRI signal; "
+            "like legacy 2..- on the time axis; use 0 to include from the first volume)"
+        ),
     )
     parser.add_argument(
         "--last-timepoint",
@@ -1050,7 +1092,8 @@ def _run_one_analysis_from_cli(args: argparse.Namespace, input_path: Path) -> No
         args (argparse.Namespace): Parsed CLI arguments.
         input_path (Path): One NIfTI or NPZ file.
     Raises:
-        ValueError: From ``run_analysis`` on invalid input or processing."""
+        ValueError: From ``run_analysis`` on invalid input or processing.
+    """
     run_analysis(
         input_path=input_path,
         mode=args.mode,
@@ -1071,7 +1114,8 @@ def cli(argv: Optional[list[str]] = None) -> int:
     Args:
         argv (Optional[list[str]]): Optional argument list.
     Returns:
-        int: Process exit code."""
+        int: Process exit code.
+    """
     args = build_arg_parser().parse_args(argv)
     input_path = args.input.expanduser()
 
@@ -1109,12 +1153,5 @@ def cli(argv: Optional[list[str]] = None) -> int:
     return 1
 
 
-def main() -> int:
-    """Execute CLI and return exit code.
-    Returns:
-        int: CLI exit code."""
-    return cli()
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

@@ -4,7 +4,9 @@
 # Dependencies: Python 3.10+, pytest, numpy, nibabel
 # Usage: uv run pytest tests/test_tsnr.py
 
-"""Acceptance tests for tSNR implementation."""
+"""
+Acceptance tests for tSNR implementation.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +32,8 @@ def write_nifti(path: Path, data: np.ndarray) -> None:
         path (Path): Output path.
         data (np.ndarray): NIfTI data.
     Returns:
-        None: This function returns nothing."""
+        None: This function returns nothing.
+    """
     nib.save(nib.Nifti1Image(data.astype(np.float32), np.eye(4)), str(path))
 
 
@@ -39,7 +42,8 @@ def load_stats(path: Path) -> Dict[str, object]:
     Args:
         path (Path): JSON path.
     Returns:
-        Dict[str, object]: Parsed payload."""
+        Dict[str, object]: Parsed payload.
+    """
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -48,7 +52,8 @@ def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
     Args:
         shape (Tuple[int, int, int, int]): `(x, y, z, t)` shape.
     Returns:
-        np.ndarray: Synthetic data."""
+        np.ndarray: Synthetic data.
+    """
     x, y, z, t = shape
     grid_x, grid_y, grid_z = np.meshgrid(
         np.linspace(-1, 1, x),
@@ -64,7 +69,9 @@ def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
 
 
 def test_nifti_phantom_happy_path(tmp_path: Path) -> None:
-    """Phantom analysis writes expected outputs and stats."""
+    """
+    Phantom analysis writes expected outputs and stats.
+    """
     data = make_phantom_data((21, 21, 9, 8))
     input_path = tmp_path / "phantom.nii.gz"
     write_nifti(input_path, data)
@@ -89,7 +96,9 @@ def test_nifti_phantom_happy_path(tmp_path: Path) -> None:
 
 
 def test_find_t1_in_anat_bids_func_under_subject(tmp_path: Path) -> None:
-    """T1 is resolved from subject/anat when bold is under subject/func."""
+    """
+    T1 is resolved from subject/anat when bold is under subject/func.
+    """
     sub = tmp_path / "sub-01"
     func_dir = sub / "func"
     anat_dir = sub / "anat"
@@ -103,7 +112,9 @@ def test_find_t1_in_anat_bids_func_under_subject(tmp_path: Path) -> None:
 
 
 def test_find_t1_in_anat_flat_anat_sibling(tmp_path: Path) -> None:
-    """When anat/ sits next to the bold file, that directory is used."""
+    """
+    When anat/ sits next to the bold file, that directory is used.
+    """
     anat_dir = tmp_path / "anat"
     anat_dir.mkdir()
     t1 = anat_dir / "T1w.nii.gz"
@@ -114,7 +125,9 @@ def test_find_t1_in_anat_flat_anat_sibling(tmp_path: Path) -> None:
 
 
 def test_find_t1_in_anat_prefers_grandparent_when_both_exist(tmp_path: Path) -> None:
-    """BIDS-style grandparent anat wins over parent anat when both exist."""
+    """
+    BIDS-style grandparent anat wins over parent anat when both exist.
+    """
     sub = tmp_path / "sub-01"
     func_dir = sub / "func"
     anat_grand = sub / "anat"
@@ -132,7 +145,9 @@ def test_find_t1_in_anat_prefers_grandparent_when_both_exist(tmp_path: Path) -> 
 
 
 def test_find_t1_in_anat_earliest_sidecar_datetime(tmp_path: Path) -> None:
-    """When multiple *T1w.nii.gz exist, the earliest AcquisitionDateTime is chosen."""
+    """
+    When multiple *T1w.nii.gz exist, the earliest AcquisitionDateTime is chosen.
+    """
     ses = tmp_path / "ses-01"
     func_dir = ses / "func"
     anat_dir = ses / "anat"
@@ -156,7 +171,9 @@ def test_find_t1_in_anat_earliest_sidecar_datetime(tmp_path: Path) -> None:
 
 
 def test_list_bold_niftis_in_dir_default_globs_and_sort(tmp_path: Path) -> None:
-    """Default globs pick *_bold.nii* only, sorted by name."""
+    """
+    Default globs pick *_bold.nii* only, sorted by name.
+    """
     func = tmp_path / "func"
     func.mkdir()
     (func / "sub-01_task-rest_echo-2_bold.nii.gz").write_bytes(b"")
@@ -173,7 +190,9 @@ def test_list_bold_niftis_in_dir_default_globs_and_sort(tmp_path: Path) -> None:
 
 
 def test_list_bold_niftis_in_dir_custom_pattern(tmp_path: Path) -> None:
-    """Custom --input-pattern restricts matches."""
+    """
+    Custom --input-pattern restricts matches.
+    """
     d = tmp_path / "d"
     d.mkdir()
     (d / "a_rest_run1.nii.gz").write_bytes(b"")
@@ -184,13 +203,17 @@ def test_list_bold_niftis_in_dir_custom_pattern(tmp_path: Path) -> None:
 
 
 def test_list_bold_niftis_in_dir_requires_directory(tmp_path: Path) -> None:
-    """Non-directory path raises ValueError."""
+    """
+    Non-directory path raises ValueError.
+    """
     with pytest.raises(ValueError, match="Not a directory"):
         list_bold_niftis_in_dir(tmp_path / "missing")
 
 
 def test_cli_directory_batch_phantom(tmp_path: Path) -> None:
-    """Directory input runs analysis per BOLD file and writes one stats JSON each."""
+    """
+    Directory input runs analysis per BOLD file and writes one stats JSON each.
+    """
     func = tmp_path / "func"
     func.mkdir()
     data = make_phantom_data((11, 11, 3, 4))
@@ -214,19 +237,25 @@ def test_cli_directory_batch_phantom(tmp_path: Path) -> None:
 
 
 def test_cli_directory_no_matches_exits_error(tmp_path: Path) -> None:
-    """Empty glob results exits with code 1."""
+    """
+    Empty glob results exits with code 1.
+    """
     func = tmp_path / "empty_func"
     func.mkdir()
     assert cli([str(func), "phantom"]) == 1
 
 
 def test_cli_input_missing_path_exits_error(tmp_path: Path) -> None:
-    """Nonexistent input that is neither file nor directory exits 1."""
+    """
+    Nonexistent input that is neither file nor directory exits 1.
+    """
     assert cli([str(tmp_path / "does_not_exist"), "phantom"]) == 1
 
 
 def test_extract_brain_tsnr_omits_intensity_block_when_mask_supplied() -> None:
-    """When a brain mask array is supplied, intensity_brain_mask is not in parameters."""
+    """
+    When a brain mask array is supplied, intensity_brain_mask is not in parameters.
+    """
     tsnr_map = np.ones((5, 5, 3), dtype=np.float64)
     mean_volume = np.ones((5, 5, 3), dtype=np.float64) * 100.0
     mask = np.zeros((5, 5, 3), dtype=bool)
@@ -244,7 +273,9 @@ def test_extract_brain_tsnr_omits_intensity_block_when_mask_supplied() -> None:
 
 
 def test_find_t1_in_anat_fallback_mtime_when_no_sidecar_time(tmp_path: Path) -> None:
-    """Without usable JSON times, the earliest file mtime among T1w candidates wins."""
+    """
+    Without usable JSON times, the earliest file mtime among T1w candidates wins.
+    """
     import os
     import time
 
@@ -267,7 +298,9 @@ def test_find_t1_in_anat_fallback_mtime_when_no_sidecar_time(tmp_path: Path) -> 
 
 
 def test_nifti_brain_happy_path(tmp_path: Path) -> None:
-    """Brain analysis uses positive-voxel baseline and erosion."""
+    """
+    Brain analysis uses positive-voxel baseline and erosion.
+    """
     data = np.zeros((9, 9, 5, 6), dtype=np.float64)
     data[2:7, 2:7, 1:4, :] = 100.0
     for ti in range(data.shape[3]):
@@ -296,7 +329,9 @@ def test_nifti_brain_happy_path(tmp_path: Path) -> None:
 
 
 def test_brain_masking_json_when_t1_pipeline_fails(tmp_path: Path) -> None:
-    """When T1 exists but FSL pipeline fails, JSON records failed pipeline and fallback."""
+    """
+    When T1 exists but FSL pipeline fails, JSON records failed pipeline and fallback.
+    """
     sub = tmp_path / "sub-01"
     func_dir = sub / "func"
     anat_dir = sub / "anat"
@@ -326,7 +361,9 @@ def test_brain_masking_json_when_t1_pipeline_fails(tmp_path: Path) -> None:
 
 
 def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
-    """Constant series yields zero tSNR and finite output."""
+    """
+    Constant series yields zero tSNR and finite output.
+    """
     data = np.ones((11, 11, 3, 4), dtype=np.float64) * 10.0
     input_path = tmp_path / "constant.nii.gz"
     write_nifti(input_path, data)
@@ -342,7 +379,9 @@ def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
 
 
 def test_phantom_roi_near_boundary_is_shifted(tmp_path: Path) -> None:
-    """Boundary ROI placement shifts in-bounds and retains full size."""
+    """
+    Boundary ROI placement shifts in-bounds and retains full size.
+    """
     data = np.zeros((21, 21, 5, 6), dtype=np.float64)
     data[1:4, 1:4, 2, :] = 100.0
     for ti in range(data.shape[3]):
@@ -360,7 +399,9 @@ def test_phantom_roi_near_boundary_is_shifted(tmp_path: Path) -> None:
 
 
 def test_oversized_roi_fails(tmp_path: Path) -> None:
-    """Oversized phantom ROI raises a clear error."""
+    """
+    Oversized phantom ROI raises a clear error.
+    """
     data = make_phantom_data((11, 11, 3, 5))
     input_path = tmp_path / "small.nii.gz"
     write_nifti(input_path, data)
@@ -370,7 +411,9 @@ def test_oversized_roi_fails(tmp_path: Path) -> None:
 
 
 def test_invalid_nifti_dimensions_fail(tmp_path: Path) -> None:
-    """3D and 5D inputs are rejected."""
+    """
+    3D and 5D inputs are rejected.
+    """
     input_3d = tmp_path / "three_d.nii.gz"
     write_nifti(input_3d, np.ones((5, 5, 5), dtype=np.float64))
     with pytest.raises(ValueError, match="Expected 4D NIfTI input"):
@@ -383,7 +426,9 @@ def test_invalid_nifti_dimensions_fail(tmp_path: Path) -> None:
 
 
 def test_empty_brain_masks_fail(tmp_path: Path) -> None:
-    """Threshold and erosion emptiness failures are surfaced."""
+    """
+    Threshold and erosion emptiness failures are surfaced.
+    """
     data = np.ones((9, 9, 5, 6), dtype=np.float64)
     input_path = tmp_path / "mask_fail.nii.gz"
     write_nifti(input_path, data)
@@ -397,7 +442,9 @@ def test_empty_brain_masks_fail(tmp_path: Path) -> None:
 
 
 def test_npz_phantom_compatibility_and_brain_rejection(tmp_path: Path) -> None:
-    """NPZ v1/v2 load in phantom mode and reject in brain mode."""
+    """
+    NPZ v1/v2 load in phantom mode and reject in brain mode.
+    """
     volume = np.ones((4, 5, 9, 9), dtype=np.float64)
     for ti in range(volume.shape[1]):
         volume[:, ti, :, :] += ti
@@ -422,7 +469,9 @@ def test_npz_phantom_compatibility_and_brain_rejection(tmp_path: Path) -> None:
 
 
 def test_output_naming_for_nii_gz(tmp_path: Path) -> None:
-    """Double-suffix NIfTI naming strips .nii.gz as one unit."""
+    """
+    Double-suffix NIfTI naming strips .nii.gz as one unit.
+    """
     data = make_phantom_data((11, 11, 3, 4))
     input_path = tmp_path / "example.nii.gz"
     write_nifti(input_path, data)
@@ -432,7 +481,9 @@ def test_output_naming_for_nii_gz(tmp_path: Path) -> None:
 
 
 def test_json_contract_fields_present(tmp_path: Path) -> None:
-    """Stats JSON includes required contract fields."""
+    """
+    Stats JSON includes required contract fields.
+    """
     data = make_phantom_data((13, 13, 3, 4))
     input_path = tmp_path / "contract.nii.gz"
     write_nifti(input_path, data)
@@ -453,7 +504,9 @@ def test_json_contract_fields_present(tmp_path: Path) -> None:
 
 
 def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None:
-    """Brain mode stats always include parameters.brain_masking with documented keys."""
+    """
+    Brain mode stats always include parameters.brain_masking with documented keys.
+    """
     data = np.zeros((9, 9, 5, 6), dtype=np.float64)
     data[2:7, 2:7, 1:4, :] = 100.0
     for ti in range(data.shape[3]):
@@ -474,7 +527,9 @@ def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None
 
 
 def test_timepoint_all_volumes_explicit_first_zero(tmp_path: Path) -> None:
-    """first_timepoint=0 includes every volume (no leading skip)."""
+    """
+    first_timepoint=0 includes every volume (no leading skip).
+    """
     data = make_phantom_data((11, 11, 3, 4))
     input_path = tmp_path / "all_t.nii.gz"
     write_nifti(input_path, data)
@@ -485,7 +540,9 @@ def test_timepoint_all_volumes_explicit_first_zero(tmp_path: Path) -> None:
 
 
 def test_default_timepoint_skip_requires_enough_volumes(tmp_path: Path) -> None:
-    """Default skip cannot leave fewer than two volumes."""
+    """
+    Default skip cannot leave fewer than two volumes.
+    """
     data = make_phantom_data((11, 11, 3, 2))
     input_path = tmp_path / "short.nii.gz"
     write_nifti(input_path, data)
@@ -494,7 +551,9 @@ def test_default_timepoint_skip_requires_enough_volumes(tmp_path: Path) -> None:
 
 
 def test_write_tmean_tstd_optional_maps(tmp_path: Path) -> None:
-    """Optional --write-tmean-tstd emits legacy-named mean/std volumes for debugging."""
+    """
+    Optional --write-tmean-tstd emits legacy-named mean/std volumes for debugging.
+    """
     data = make_phantom_data((11, 11, 3, 5))
     input_path = tmp_path / "phantom.nii.gz"
     write_nifti(input_path, data)
@@ -517,7 +576,9 @@ def test_write_tmean_tstd_optional_maps(tmp_path: Path) -> None:
 
 
 def test_cli_main_writes_outputs(tmp_path: Path) -> None:
-    """Running ``python tsnr.py`` must invoke the CLI (not exit after import-only)."""
+    """
+    Running ``python tsnr.py`` must invoke the CLI (not exit after import-only).
+    """
     data = make_phantom_data((11, 11, 3, 5))
     input_path = tmp_path / "cli_phantom.nii.gz"
     write_nifti(input_path, data)
@@ -547,7 +608,9 @@ def test_cli_main_writes_outputs(tmp_path: Path) -> None:
 
 
 def test_masked_maps_match_roi_voxel_count_phantom(tmp_path: Path) -> None:
-    """Default map masking leaves NaNs only outside the phantom ROI on disk."""
+    """
+    Default map masking leaves NaNs only outside the phantom ROI on disk.
+    """
     data = make_phantom_data((11, 11, 3, 5))
     input_path = tmp_path / "phantom.nii.gz"
     write_nifti(input_path, data)
@@ -561,7 +624,9 @@ def test_masked_maps_match_roi_voxel_count_phantom(tmp_path: Path) -> None:
 
 
 def test_full_fov_maps_cli_flag(tmp_path: Path) -> None:
-    """--full-fov-maps writes uncensored volumes and records it in JSON."""
+    """
+    --full-fov-maps writes uncensored volumes and records it in JSON.
+    """
     data = make_phantom_data((11, 11, 3, 5))
     input_path = tmp_path / "p.nii.gz"
     write_nifti(input_path, data)
