@@ -26,38 +26,29 @@ from tsnr import cli, compute_tsnr_map, extract_brain_tsnr, find_t1_in_anat, lis
 
 def write_nifti(path: Path, data: np.ndarray) -> None:
     """Write a NIfTI file with identity affine.
-
     Args:
         path (Path): Output path.
         data (np.ndarray): NIfTI data.
-
     Returns:
-        None: This function returns nothing.
-    """
+        None: This function returns nothing."""
     nib.save(nib.Nifti1Image(data.astype(np.float32), np.eye(4)), str(path))
 
 
 def load_stats(path: Path) -> Dict[str, object]:
     """Read stats JSON output.
-
     Args:
         path (Path): JSON path.
-
     Returns:
-        Dict[str, object]: Parsed payload.
-    """
+        Dict[str, object]: Parsed payload."""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
     """Create synthetic phantom-like 4D data.
-
     Args:
         shape (Tuple[int, int, int, int]): `(x, y, z, t)` shape.
-
     Returns:
-        np.ndarray: Synthetic data.
-    """
+        np.ndarray: Synthetic data."""
     x, y, z, t = shape
     grid_x, grid_y, grid_z = np.meshgrid(
         np.linspace(-1, 1, x),
