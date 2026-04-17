@@ -413,6 +413,22 @@ def derive_basename(input_path: Path) -> str:
     return input_path.stem
 
 
+def default_output_dir_for_input(input_path: Path) -> Path:
+    """Return default output directory for an input NIfTI/NPZ path.
+    If the input lives under a BIDS-style ``func`` folder, use sibling
+    ``derivatives/tsnr`` under that parent (for example ``ses-1a/derivatives/tsnr``).
+    Otherwise, use ``<input_parent>/derivatives/tsnr``.
+    Args:
+        input_path (Path): Input file path.
+    Returns:
+        Path: Default destination directory for outputs.
+    """
+    parent = input_path.parent
+    if parent.name == "func":
+        return parent.parent / "derivatives" / "tsnr"
+    return parent / "derivatives" / "tsnr"
+
+
 def apply_timepoint_selection(
     data_4d: np.ndarray,
     first_index: int,
@@ -900,7 +916,9 @@ def run_analysis(
     Args:
         input_path (Path): NIfTI or NPZ path.
         mode (str): `phantom` or `brain`.
-        output_dir (Optional[Path]): Destination directory.
+        output_dir (Optional[Path]): Destination directory. When ``None``, defaults
+            to sibling ``derivatives/tsnr`` (BIDS-style ``func`` inputs use
+            ``<session>/derivatives/tsnr``).
         roi_size (int): Phantom ROI side.
         slice_index (Optional[int]): Phantom slice override.
         threshold (float): Brain threshold (used for the intensity fallback and
@@ -945,7 +963,7 @@ def run_analysis(
         last_index_inclusive=last_timepoint,
     )
     mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
-    target_dir = output_dir if output_dir is not None else input_path.parent
+    target_dir = output_dir if output_dir is not None else default_output_dir_for_input(input_path)
     brain_mask_override: Optional[np.ndarray] = None
 
     if mode == "phantom":

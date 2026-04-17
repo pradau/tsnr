@@ -23,7 +23,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tsnr import cli, compute_tsnr_map, extract_brain_tsnr, find_t1_in_anat, list_bold_niftis_in_dir, run_analysis
+from tsnr import (
+    cli,
+    compute_tsnr_map,
+    default_output_dir_for_input,
+    extract_brain_tsnr,
+    find_t1_in_anat,
+    list_bold_niftis_in_dir,
+    run_analysis,
+)
 
 
 def write_nifti(path: Path, data: np.ndarray) -> None:
@@ -232,8 +240,27 @@ def test_cli_directory_batch_phantom(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (func / "sub-01_task-x_echo-1_bold_tsnr_stats.json").is_file()
-    assert (func / "sub-01_task-x_echo-2_bold_tsnr_stats.json").is_file()
+    out_dir = tmp_path / "derivatives" / "tsnr"
+    assert (out_dir / "sub-01_task-x_echo-1_bold_tsnr_stats.json").is_file()
+    assert (out_dir / "sub-01_task-x_echo-2_bold_tsnr_stats.json").is_file()
+
+
+def test_default_output_dir_for_bids_func_and_non_bids(tmp_path: Path) -> None:
+    """
+    Default output dir is sibling derivatives/tsnr with func-special handling.
+    """
+    ses = tmp_path / "sub-01" / "ses-1a"
+    func = ses / "func"
+    func.mkdir(parents=True)
+    bids_input = func / "sub-01_ses-1a_task-rest_echo-1_bold.nii.gz"
+    bids_input.write_bytes(b"")
+    assert default_output_dir_for_input(bids_input) == ses / "derivatives" / "tsnr"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    plain_input = plain / "run.nii.gz"
+    plain_input.write_bytes(b"")
+    assert default_output_dir_for_input(plain_input) == plain / "derivatives" / "tsnr"
 
 
 def test_cli_directory_no_matches_exits_error(tmp_path: Path) -> None:

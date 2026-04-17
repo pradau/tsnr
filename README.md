@@ -85,7 +85,10 @@ Useful options:
 
 ## Outputs
 
-Outputs go to `--output-dir`, or to the input file’s directory if omitted:
+Outputs go to `--output-dir`, or to a default `derivatives/tsnr` location when omitted:
+
+- BIDS-style `.../ses-*/func/<run>_bold.nii.gz` input -> `.../ses-*/derivatives/tsnr/`
+- Other file locations -> `<input_parent>/derivatives/tsnr/`
 
 - `<basename>_tsnr_map.nii.gz`
 - `<basename>_tsnr_stats.json`
