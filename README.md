@@ -19,9 +19,11 @@ Behavior and the stats JSON contract are documented below. Optional FSL-based T1
 ```bash
 uv sync --group dev
 uv run tsnr.py /path/to/run.nii.gz phantom
-uv run tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
+uv run tsnr.py /path/to/bids/func/sub-01_task-rest_bold.nii.gz brain
 uv run pytest
 ```
+
+Default brain masking uses T1 BET plus registration when a `*T1w.nii*` is available under `anat/` relative to the BOLD file (typical BIDS `func` / `anat` layout). Options `--threshold` and `--erosion-voxels` tune the **intensity fallback** when that pipeline is not used; see **Brain mode**.
 
 ## Requirements
 
@@ -65,7 +67,7 @@ uv run tsnr.py /path/to/run.nii.gz brain --write-tmean-tstd --output-dir /path/t
 uv run tsnr.py /path/to/ses-x/func brain --output-dir /path/to/derivatives/tsnr
 ```
 
-**Directory input (multi-echo / batch):** pass a **folder** (for example a BIDS `func/` directory) instead of a single file. The tool finds all `*_bold.nii.gz` and `*_bold.nii` in that folder (non-recursive), sorts them by filename, and runs the same mode and options on **each** file. Use `--input-pattern GLOB` to use a single custom glob instead of the default BOLD patterns (for example if your files do not contain `_bold` in the name). If nothing matches, the CLI exits with an error. If any run in a batch fails, the process exits non-zero after attempting the rest; errors are printed as `Error: <path>: ...` on stderr.
+**Directory input (multi-echo / batch):** pass a **folder** (for example a BIDS `func/` directory) instead of a single file. The tool finds all `*_bold.nii.gz` and `*_bold.nii` in that folder (non-recursive), sorts them by filename, and runs the same mode and options on **each** file. Use `--input-pattern GLOB` to use a single custom glob instead of the default BOLD patterns (for example if your files do not contain `_bold` in the name). 
 
 **Batch output naming (multi-task, multi-echo):** Derivatives are named from each input file’s stem (the filename without `.nii` / `.nii.gz`). BIDS-style BOLD names already encode subject, session, `task-*`, `echo-*`, and `*_bold`, so each map stays self-describing without extra prefixes. For example, if `func/` contains two tasks with four echoes each (eight runs), you get eight distinct outputs such as `sub-01_ses-1a_task-rest_echo-2_bold_tsnr_map.nii.gz` alongside `..._task-other_echo-1_bold_tsnr_map.nii.gz`, one pair of stats/maps per source BOLD. When `--output-dir` is set, all of those files are written there.
 
