@@ -55,18 +55,26 @@ uv run tsnr.py /path/to/run.nii.gz brain --threshold 0.25 --erosion-voxels 2
 uv run tsnr.py /path/to/cache.npz phantom
 uv run tsnr.py /path/to/run.nii.gz brain --full-fov-maps
 uv run tsnr.py /path/to/run.nii.gz brain --write-tmean-tstd --output-dir /path/to/out
+uv run tsnr.py /path/to/ses-x/func brain --output-dir /path/to/derivatives/tsnr
 ```
+
+**Directory input (multi-echo / batch):** pass a **folder** (for example a BIDS `func/` directory) instead of a single file. The tool finds all `*_bold.nii.gz` and `*_bold.nii` in that folder (non-recursive), sorts them by filename, and runs the same mode and options on **each** file. Use `--input-pattern GLOB` to use a single custom glob instead of the default BOLD patterns (for example if your files do not contain `_bold` in the name). If nothing matches, the CLI exits with an error. If any run in a batch fails, the process exits non-zero after attempting the rest; errors are printed as `Error: <path>: ...` on stderr.
+
+**Batch output naming (multi-task, multi-echo):** Derivatives are named from each input file’s stem (the filename without `.nii` / `.nii.gz`). BIDS-style BOLD names already encode subject, session, `task-*`, `echo-*`, and `*_bold`, so each map stays self-describing without extra prefixes. For example, if `func/` contains two tasks with four echoes each (eight runs), you get eight distinct outputs such as `sub-01_ses-1a_task-rest_echo-2_bold_tsnr_map.nii.gz` alongside `..._task-other_echo-1_bold_tsnr_map.nii.gz`, one pair of stats/maps per source BOLD. When `--output-dir` is set, all of those files are written there.
+
+**FSL scratch (brain mode):** Intermediate BET/FLIRT files for a run live under `--output-dir` (or the input directory) at `.tsnr_fsl_work/<basename>/`, where `<basename>` matches that run’s output stem, so batch jobs do not overwrite each other’s working files.
 
 Useful options:
 
 - `--first-timepoint` / `--last-timepoint`: 0-based volume range (default skips the first volume with `first-timepoint=1`, similar to legacy `2..-` on the time axis).
 - `--write-tmean-tstd`: also write temporal mean and standard deviation maps (`*_Tmean.nii.gz`, `*_Tstd.nii.gz`).
 - `--full-fov-maps`: do not NaN voxels outside the ROI in written maps.
+- `--input-pattern`: when `input` is a directory, override the default `*_bold.nii.gz` / `*_bold.nii` discovery with one glob.
 
 ## Inputs
 
-- NIfTI: `.nii` or `.nii.gz` (must be 4D, at least 2 time points)
-- NPZ: fMRIQA-style phantom cache (`.npz`) is supported only for `phantom` mode
+- **Single file:** NIfTI `.nii` or `.nii.gz` (must be 4D, at least 2 time points), or for `phantom` mode only, an fMRIQA-style phantom cache `.npz`.
+- **Directory:** only NIfTI batching is supported (default BOLD globs above). NPZ remains single-file `phantom` use only.
 
 ## Outputs
 
@@ -152,4 +160,4 @@ The CLI exits nonzero for invalid inputs, including:
 uv run pytest
 ```
 
-Coverage includes phantom and brain paths, T1 discovery and ordering, brain masking JSON, intensity-only parameters in stats, BET fallback when FSL steps fail, timepoint selection, and output naming.
+Coverage includes phantom and brain paths, T1 discovery and ordering, brain masking JSON, intensity-only parameters in stats, BET fallback when FSL steps fail, timepoint selection, directory batch discovery and CLI, and output naming.

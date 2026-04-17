@@ -3,6 +3,7 @@
 # Compute raw tSNR maps and summary statistics for phantom and brain fMRI inputs.
 # Dependencies: Python 3.10+, nibabel, numpy, scipy; optional FSL (brain T1 mask)
 # Usage: uv run tsnr.py /path/to/input.nii.gz phantom
+#        uv run tsnr.py /path/to/func brain
 #        uv run tsnr.py /path/to/input.nii.gz brain --threshold 0.25 --erosion-voxels 2
 #        uv run tsnr.py /path/to/cache.npz phantom --roi-size 15
 #        uv run tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
@@ -222,6 +223,42 @@ def find_t1_in_anat(func_input_path: Path) -> Optional[Path]:
         t1w_list.sort(key=_t1w_sort_key)
         return t1w_list[0]
     return None
+
+
+def list_bold_niftis_in_dir(directory: Path, pattern: Optional[str] = None) -> List[Path]:
+    """List BIDS-style BOLD NIfTI files in a directory (non-recursive).
+
+    By default matches ``*_bold.nii.gz`` and ``*_bold.nii`` so typical ``sbref`` and
+    non-bold files are excluded. Pass ``pattern`` to use a single custom glob instead
+    (for example when filenames omit ``_bold``).
+
+    Args:
+        directory (Path): Directory to scan (must exist and be a directory).
+        pattern (Optional[str]): If set, only this glob pattern is used relative to
+            ``directory``. If ``None``, the default BOLD patterns apply.
+
+    Returns:
+        List[Path]: Sorted, deduplicated file paths (lexicographic by basename).
+
+    Raises:
+        ValueError: If ``directory`` is not an existing directory.
+    """
+    if not directory.is_dir():
+        raise ValueError(f"Not a directory or directory does not exist: {directory}")
+    seen: set[Path] = set()
+    out: List[Path] = []
+    patterns: Tuple[str, ...] = (pattern,) if pattern is not None else ("*_bold.nii.gz", "*_bold.nii")
+    for pat in patterns:
+        for p in directory.glob(pat):
+            if not p.is_file():
+                continue
+            resolved = p.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(p)
+    out.sort(key=lambda x: x.name)
+    return out
 
 
 def _format_brain_pipeline_error(exc: BaseException) -> str:
@@ -990,7 +1027,7 @@ def run_analysis(
                     brain_masking_report=_brain_masking_fallback_no_t1(),
                 )
             else:
-                work_dir = target_dir / ".tsnr_fsl_work"
+                work_dir = target_dir / ".tsnr_fsl_work" / derive_basename(input_path)
                 try:
                     mask_path = create_bet_mask_for_func(
                         t1_path,
@@ -1058,7 +1095,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         argparse.ArgumentParser: Configured parser.
     """
     parser = argparse.ArgumentParser(description="Compute raw fMRI tSNR map and summary statistics.")
-    parser.add_argument("input", type=Path, help="Input .nii/.nii.gz or phantom-only .npz path")
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Path to a NIfTI or NPZ file, or a directory of BOLD runs (see --input-pattern)",
+    )
     parser.add_argument("mode", choices=("phantom", "brain"), help="Analysis mode")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory")
     parser.add_argument("--roi-size", type=int, default=15, help="Phantom ROI side length (odd integer)")
@@ -1092,7 +1133,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Write tSNR/Tmean/Tstd NIfTIs for the full field of view (do not NaN "
         "voxels outside the brain mask or phantom ROI)",
     )
+    parser.add_argument(
+        "--input-pattern",
+        type=str,
+        default=None,
+        metavar="GLOB",
+        help="When input is a directory, glob pattern for NIfTIs (default: *_bold.nii.gz "
+        "and *_bold.nii). Use a single pattern, e.g. *_task-rest_*.nii.gz",
+    )
     return parser
+
+
+def _run_one_analysis_from_cli(args: argparse.Namespace, input_path: Path) -> None:
+    """Invoke ``run_analysis`` for one input using CLI-bound options.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments.
+        input_path (Path): One NIfTI or NPZ file.
+
+    Raises:
+        ValueError: From ``run_analysis`` on invalid input or processing.
+    """
+    run_analysis(
+        input_path=input_path,
+        mode=args.mode,
+        output_dir=args.output_dir,
+        roi_size=args.roi_size,
+        slice_index=args.slice_index,
+        threshold=args.threshold,
+        erosion_voxels=args.erosion_voxels,
+        write_tmean_tstd=args.write_tmean_tstd,
+        first_timepoint=args.first_timepoint,
+        last_timepoint=args.last_timepoint,
+        mask_maps=not args.full_fov_maps,
+    )
 
 
 def cli(argv: Optional[list[str]] = None) -> int:
@@ -1105,24 +1179,40 @@ def cli(argv: Optional[list[str]] = None) -> int:
         int: Process exit code.
     """
     args = build_arg_parser().parse_args(argv)
-    try:
-        run_analysis(
-            input_path=args.input,
-            mode=args.mode,
-            output_dir=args.output_dir,
-            roi_size=args.roi_size,
-            slice_index=args.slice_index,
-            threshold=args.threshold,
-            erosion_voxels=args.erosion_voxels,
-            write_tmean_tstd=args.write_tmean_tstd,
-            first_timepoint=args.first_timepoint,
-            last_timepoint=args.last_timepoint,
-            mask_maps=not args.full_fov_maps,
-        )
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    input_path = args.input.expanduser()
+
+    if input_path.is_file():
+        try:
+            _run_one_analysis_from_cli(args, input_path)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    if input_path.is_dir():
+        try:
+            bold_paths = list_bold_niftis_in_dir(input_path, pattern=args.input_pattern)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if not bold_paths:
+            default_hint = "*_bold.nii.gz and *_bold.nii" if args.input_pattern is None else args.input_pattern
+            print(
+                f"Error: no matching BOLD NIfTIs in {input_path} (pattern: {default_hint})",
+                file=sys.stderr,
+            )
+            return 1
+        failures = 0
+        for bold in bold_paths:
+            try:
+                _run_one_analysis_from_cli(args, bold)
+            except (ValueError, OSError) as exc:
+                print(f"Error: {bold}: {exc}", file=sys.stderr)
+                failures += 1
+        return 1 if failures > 0 else 0
+
+    print(f"Error: input is not a file or directory: {input_path}", file=sys.stderr)
+    return 1
 
 
 def main() -> int:

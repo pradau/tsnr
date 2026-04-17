@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tsnr import compute_tsnr_map, extract_brain_tsnr, find_t1_in_anat, run_analysis
+from tsnr import cli, compute_tsnr_map, extract_brain_tsnr, find_t1_in_anat, list_bold_niftis_in_dir, run_analysis
 
 
 def write_nifti(path: Path, data: np.ndarray) -> None:
@@ -162,6 +162,76 @@ def test_find_t1_in_anat_earliest_sidecar_datetime(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert find_t1_in_anat(bold) == earlier
+
+
+def test_list_bold_niftis_in_dir_default_globs_and_sort(tmp_path: Path) -> None:
+    """Default globs pick *_bold.nii* only, sorted by name."""
+    func = tmp_path / "func"
+    func.mkdir()
+    (func / "sub-01_task-rest_echo-2_bold.nii.gz").write_bytes(b"")
+    (func / "sub-01_task-rest_echo-1_bold.nii.gz").write_bytes(b"")
+    (func / "sub-01_task-rest_sbref.nii.gz").write_bytes(b"")
+    (func / "sub-01_task-rest_echo-1_bold.nii").write_bytes(b"")
+    (func / "events.tsv").write_text("onset\tduration\n", encoding="utf-8")
+    paths = list_bold_niftis_in_dir(func)
+    assert [p.name for p in paths] == [
+        "sub-01_task-rest_echo-1_bold.nii",
+        "sub-01_task-rest_echo-1_bold.nii.gz",
+        "sub-01_task-rest_echo-2_bold.nii.gz",
+    ]
+
+
+def test_list_bold_niftis_in_dir_custom_pattern(tmp_path: Path) -> None:
+    """Custom --input-pattern restricts matches."""
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "a_rest_run1.nii.gz").write_bytes(b"")
+    (d / "b_rest_run2.nii.gz").write_bytes(b"")
+    (d / "other_bold.nii.gz").write_bytes(b"")
+    paths = list_bold_niftis_in_dir(d, pattern="*_run*.nii.gz")
+    assert [p.name for p in paths] == ["a_rest_run1.nii.gz", "b_rest_run2.nii.gz"]
+
+
+def test_list_bold_niftis_in_dir_requires_directory(tmp_path: Path) -> None:
+    """Non-directory path raises ValueError."""
+    with pytest.raises(ValueError, match="Not a directory"):
+        list_bold_niftis_in_dir(tmp_path / "missing")
+
+
+def test_cli_directory_batch_phantom(tmp_path: Path) -> None:
+    """Directory input runs analysis per BOLD file and writes one stats JSON each."""
+    func = tmp_path / "func"
+    func.mkdir()
+    data = make_phantom_data((11, 11, 3, 4))
+    write_nifti(func / "sub-01_task-x_echo-1_bold.nii.gz", data)
+    write_nifti(func / "sub-01_task-x_echo-2_bold.nii.gz", data)
+    assert (
+        cli(
+            [
+                str(func),
+                "phantom",
+                "--roi-size",
+                "11",
+                "--first-timepoint",
+                "0",
+            ]
+        )
+        == 0
+    )
+    assert (func / "sub-01_task-x_echo-1_bold_tsnr_stats.json").is_file()
+    assert (func / "sub-01_task-x_echo-2_bold_tsnr_stats.json").is_file()
+
+
+def test_cli_directory_no_matches_exits_error(tmp_path: Path) -> None:
+    """Empty glob results exits with code 1."""
+    func = tmp_path / "empty_func"
+    func.mkdir()
+    assert cli([str(func), "phantom"]) == 1
+
+
+def test_cli_input_missing_path_exits_error(tmp_path: Path) -> None:
+    """Nonexistent input that is neither file nor directory exits 1."""
+    assert cli([str(tmp_path / "does_not_exist"), "phantom"]) == 1
 
 
 def test_extract_brain_tsnr_omits_intensity_block_when_mask_supplied() -> None:
