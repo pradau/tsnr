@@ -17,6 +17,9 @@ simple-tSNR/
 data/
 output/
 
+# Generated plot reports (local only)
+reports/
+
 # Local notes/spec variants not for tracking
 New_comparison.md
 Spec*.md

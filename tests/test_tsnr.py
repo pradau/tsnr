@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tsnr import (
     cli,
+    compute_roi_tr_spike_metrics,
     compute_tsnr_map,
     default_output_dir_for_input,
     extract_brain_tsnr,
@@ -67,6 +68,46 @@ def assert_ftsnr_positive_finite(stats: Dict[str, object]) -> None:
     assert fm > 0.0 and fs > 0.0
 
 
+def test_compute_roi_tr_spike_metrics_empty_array() -> None:
+    """Empty ROI-mean series yields zero counts and n_timepoints 0."""
+    out = compute_roi_tr_spike_metrics(np.array([], dtype=np.float64))
+    assert out["n_timepoints"] == 0
+    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert out["roi_mean_signal_per_tr"] == []
+
+
+def test_compute_roi_tr_spike_metrics_single_timepoint() -> None:
+    """One sample cannot form z-scores; no spikes."""
+    out = compute_roi_tr_spike_metrics(np.array([42.0]))
+    assert out["n_timepoints"] == 1
+    assert out["robust_median"] == pytest.approx(42.0)
+    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert out["roi_mean_signal_per_tr"] == [42.0]
+
+
+def test_compute_roi_tr_spike_metrics_constant_series() -> None:
+    """Constant series has zero spread and no spikes."""
+    out = compute_roi_tr_spike_metrics(np.ones(30, dtype=np.float64) * 3.14)
+    assert out["n_timepoints"] == 30
+    assert len(out["robust_z_per_tr"]) == 30
+    assert float(np.max(np.abs(np.asarray(out["robust_z_per_tr"], dtype=np.float64)))) < 1e-9
+    assert out["max_abs_robust_z"] == pytest.approx(0.0)
+    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert len(out["roi_mean_signal_per_tr"]) == 30
+    assert out["roi_mean_signal_per_tr"][0] == pytest.approx(3.14)
+
+
+def test_compute_roi_tr_spike_metrics_single_large_spike() -> None:
+    """One extreme TR is flagged by both robust and classical criteria."""
+    series = np.ones(60, dtype=np.float64) * 100.0
+    series[30] = 50_000.0
+    out = compute_roi_tr_spike_metrics(series)
+    assert out["n_timepoints"] == 60
+    assert int(out["n_tr_abs_robust_z_gt_3"]) >= 1
+    assert float(out["max_abs_robust_z"]) > 3.0
+    assert float(out["pct_tr_abs_robust_z_gt_3"]) == pytest.approx(100.0 / 60.0, rel=1e-9)
+
+
 def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
     """Create synthetic phantom-like 4D data.
     Args:
@@ -106,17 +147,17 @@ def test_nifti_phantom_happy_path(tmp_path: Path) -> None:
     assert stats["n_voxels_in_roi"] == 225
     assert stats["map_affine_source"] == "input"
     assert isinstance(stats["parameters"], dict)
-    assert stats["n_timepoints"] == 7
-    assert stats["volume_shape"] == [21, 21, 9, 7]
+    assert stats["n_timepoints"] == 6
+    assert stats["volume_shape"] == [21, 21, 9, 6]
     ts = stats["timepoint_selection"]
-    assert ts["first_index"] == 1
+    assert ts["first_index"] == 2
     assert ts["last_index_inclusive"] == 7
     assert ts["n_timepoints_in_file"] == 8
-    assert ts["n_timepoints_used"] == 7
+    assert ts["n_timepoints_used"] == 6
     assert_ftsnr_positive_finite(stats)
     assert int(stats["n_voxels_in_roi"]) > 1
     assert float(stats["ftsnr"]) > float(stats["tsnr_mean"])
-    assert float(stats["roi_mean_signal_std"]) > 1.0
+    assert float(stats["roi_mean_signal_std"]) > 0.5
 
 
 def test_fmriqa_volume_to_data_4d_matches_npz_transpose(tmp_path: Path) -> None:
@@ -144,7 +185,7 @@ def test_run_phantom_analysis_from_4d_matches_run_analysis_npz(tmp_path: Path) -
     from tsnr import load_phantom_npz_4d
 
     data_4d = load_phantom_npz_4d(from_npz)
-    pa = run_phantom_analysis_from_4d(data_4d, roi_size=15, slice_index=None, first_timepoint=1, last_timepoint=None)
+    pa = run_phantom_analysis_from_4d(data_4d, roi_size=15, slice_index=None, first_timepoint=2, last_timepoint=None)
     _, stats_path, _ = run_analysis(from_npz, mode="phantom", output_dir=tmp_path)
     stats = load_stats(stats_path)
     assert pa["summary"]["tsnr_mean"] == pytest.approx(stats["tsnr_mean"])
@@ -460,6 +501,22 @@ def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
     assert stats["tsnr_mean"] == 0.0
     assert stats["ftsnr"] == 0.0
     assert stats["roi_mean_signal_std"] == 0.0
+    spikes = stats["roi_mean_tr_spike_metrics"]
+    assert isinstance(spikes, dict)
+    assert int(spikes["n_tr_abs_robust_z_gt_3"]) == 0
+
+
+def test_roi_mean_tr_spike_metrics_detect_strong_outlier(tmp_path: Path) -> None:
+    """A single corrupted TR in ROI-mean series increases spike counts."""
+    data = make_phantom_data((21, 21, 9, 20))
+    data[:, :, :, 10] += 5000.0
+    input_path = tmp_path / "spike.nii.gz"
+    write_nifti(input_path, data)
+    _, stats_path, _ = run_analysis(input_path=input_path, mode="phantom")
+    stats = load_stats(stats_path)
+    spikes = stats["roi_mean_tr_spike_metrics"]
+    assert int(spikes["n_tr_abs_robust_z_gt_3"]) >= 1
+    assert float(spikes["max_abs_robust_z"]) > 3.0
 
 
 def test_phantom_roi_near_boundary_is_shifted(tmp_path: Path) -> None:
@@ -539,7 +596,7 @@ def test_npz_phantom_compatibility_and_brain_rejection(tmp_path: Path) -> None:
     payload_v2 = load_stats(stats_v2)
     assert payload_v2["input_type"] == "fmriqa_pixel_cache_npz"
     assert payload_v2["map_affine_source"] == "identity"
-    assert payload_v2["n_timepoints"] == 4
+    assert payload_v2["n_timepoints"] == 3
     assert payload_v2["timepoint_selection"]["n_timepoints_in_file"] == 5
 
     npz_v1 = tmp_path / "cache_v1.npz"
@@ -632,7 +689,7 @@ def test_default_timepoint_skip_requires_enough_volumes(tmp_path: Path) -> None:
     """
     Default skip cannot leave fewer than two volumes.
     """
-    data = make_phantom_data((11, 11, 3, 2))
+    data = make_phantom_data((11, 11, 3, 3))
     input_path = tmp_path / "short.nii.gz"
     write_nifti(input_path, data)
     with pytest.raises(ValueError, match="at least 2 volumes are required"):

@@ -8,6 +8,7 @@
 #        uv run tsnr.py /path/to/cache.npz phantom --roi-size 15
 #        uv run tsnr.py /path/to/input.nii.gz phantom --write-tmean-tstd
 #        uv run tsnr.py /path/to/input.nii.gz phantom --first-timepoint 0
+#        (default --first-timepoint is 2: drop first two volumes)
 
 """
 tSNR calculation helpers and CLI orchestration.
@@ -435,8 +436,8 @@ def apply_timepoint_selection(
     last_index_inclusive: Optional[int],
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     """Slice the time axis to match legacy-style volume ranges (for example `2..-`).
-    Default first index 1 drops the first volume to reduce non-steady-state transient
-    effects in fMRI signal.
+    Default first index 2 (via CLI) drops the first two volumes to reduce non-steady-state
+    transient effects in fMRI signal.
     Args:
         data_4d (np.ndarray): Full `(x, y, z, t)` volume.
         first_index (int): 0-based index of the first timepoint to include.
@@ -569,7 +570,7 @@ def run_phantom_analysis_from_4d(
     *,
     roi_size: int = 15,
     slice_index: Optional[int] = None,
-    first_timepoint: int = 1,
+    first_timepoint: int = 2,
     last_timepoint: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Phantom-mode tSNR map, ROI extraction, and summary statistics from 4D data.
@@ -581,7 +582,7 @@ def run_phantom_analysis_from_4d(
         data_4d (np.ndarray): Full ``(x, y, z, t)`` volume before timepoint selection.
         roi_size (int): Odd positive phantom ROI edge length in pixels.
         slice_index (Optional[int]): Z slice index, or ``None`` for middle slice.
-        first_timepoint (int): 0-based first time index to include (default ``1`` drops first volume).
+        first_timepoint (int): 0-based first time index to include (default ``2`` drops first two volumes).
         last_timepoint (Optional[int]): 0-based last time index inclusive, or ``None`` for end.
 
     Returns:
@@ -821,27 +822,123 @@ def summarize(values: np.ndarray) -> Dict[str, float]:
     }
 
 
-def compute_ftsnr_metrics(data_4d: np.ndarray, roi_mask: np.ndarray) -> Dict[str, float]:
+def compute_roi_tr_spike_metrics(roi_mean_series: np.ndarray) -> Dict[str, Any]:
+    """TR-level outlier metrics on the ROI-mean time course (after timepoint selection).
+
+    Uses robust z (median and MAD scaled by 1.4826) to flag volumes with |z| > 3.
+    Helps detect corrupted TRs with very high or very low signal relative to the run.
+
+    Args:
+        roi_mean_series (np.ndarray): 1D ROI-mean signal, length ``n_timepoints``.
+
+    Returns:
+        Dict[str, Any]: Robust counts, fractions, max |z|, scale parameters,
+        ``robust_z_per_tr``, and ``roi_mean_signal_per_tr`` (raw ROI mean per TR;
+        the latter supports TR-index plots that linear-detrend before z).
+    """
+    series = np.asarray(roi_mean_series, dtype=np.float64).ravel()
+    n_t = int(series.size)
+    out: Dict[str, Any] = {
+        "n_timepoints": n_t,
+        "method_robust_z": "median_and_mad_scaled_1.4826",
+    }
+    if n_t < 1 or not np.all(np.isfinite(series)):
+        out.update(
+            {
+                "robust_median": 0.0,
+                "mad": 0.0,
+                "robust_sigma": 0.0,
+                "n_tr_abs_robust_z_gt_3": 0,
+                "pct_tr_abs_robust_z_gt_3": 0.0,
+                "max_abs_robust_z": 0.0,
+                "robust_z_per_tr": [],
+                "roi_mean_signal_per_tr": [],
+            }
+        )
+        return out
+    if n_t < 2:
+        out.update(
+            {
+                "robust_median": float(series[0]),
+                "mad": 0.0,
+                "robust_sigma": 0.0,
+                "n_tr_abs_robust_z_gt_3": 0,
+                "pct_tr_abs_robust_z_gt_3": 0.0,
+                "max_abs_robust_z": 0.0,
+                "robust_z_per_tr": [0.0],
+                "roi_mean_signal_per_tr": [float(series[0])],
+            }
+        )
+        return out
+
+    median = float(np.median(series))
+    mad = float(np.median(np.abs(series - median)))
+    robust_sigma = 1.4826 * mad
+    if robust_sigma <= 1e-12:
+        robust_sigma = float(np.std(series, ddof=0))
+    rs = float(robust_sigma)
+    if rs <= 1e-12:
+        signed_z = np.zeros_like(series)
+        abs_robust_z = np.zeros_like(series)
+    else:
+        signed_z = (series - median) / rs
+        abs_robust_z = np.abs(signed_z)
+    n_rob = int(np.sum(abs_robust_z > 3.0))
+
+    out.update(
+        {
+            "robust_median": median,
+            "mad": mad,
+            "robust_sigma": rs,
+            "n_tr_abs_robust_z_gt_3": n_rob,
+            "pct_tr_abs_robust_z_gt_3": 100.0 * float(n_rob) / float(n_t),
+            "max_abs_robust_z": float(np.max(abs_robust_z)),
+            "robust_z_per_tr": [float(x) for x in signed_z],
+            "roi_mean_signal_per_tr": [float(x) for x in series],
+        }
+    )
+    return out
+
+
+def compute_ftsnr_metrics(data_4d: np.ndarray, roi_mask: np.ndarray) -> Dict[str, Any]:
     """Temporal ftSNR from the spatially averaged ROI signal across time.
     Args:
         data_4d (np.ndarray): Shape ``(x, y, z, t)`` after timepoint selection.
         roi_mask (np.ndarray): Boolean mask shaped ``(x, y, z)``.
     Returns:
-        Dict[str, float]: ``ftsnr`` (mean of ROI-mean series / its std) and
-        ``roi_mean_signal_std`` (std of ROI-mean series, signal units). Zeros when
-        temporal std is zero, matching voxelwise tSNR degenerate handling.
+        Dict[str, Any]: ``ftsnr``, ``roi_mean_signal_std``, and
+        ``roi_mean_tr_spike_metrics`` (TR-level outlier counts on ROI-mean series).
+        ``ftsnr`` and ``roi_mean_signal_std`` are zero when temporal std is zero or ROI
+        is empty, matching voxelwise tSNR degenerate handling.
     """
     roi_ts = data_4d[roi_mask]
     if roi_ts.size == 0:
-        return {"ftsnr": 0.0, "roi_mean_signal_std": 0.0}
+        return {
+            "ftsnr": 0.0,
+            "roi_mean_signal_std": 0.0,
+            "roi_mean_tr_spike_metrics": compute_roi_tr_spike_metrics(np.array([], dtype=np.float64)),
+        }
     roi_mean_series = np.mean(roi_ts, axis=0)
+    spike_block = compute_roi_tr_spike_metrics(roi_mean_series)
     roi_mean_signal_std = float(np.std(roi_mean_series, ddof=0))
     if not np.isfinite(roi_mean_signal_std) or roi_mean_signal_std <= 0.0:
-        return {"ftsnr": 0.0, "roi_mean_signal_std": 0.0}
+        return {
+            "ftsnr": 0.0,
+            "roi_mean_signal_std": 0.0,
+            "roi_mean_tr_spike_metrics": spike_block,
+        }
     ftsnr = float(np.mean(roi_mean_series) / roi_mean_signal_std)
     if not np.isfinite(ftsnr):
-        return {"ftsnr": 0.0, "roi_mean_signal_std": roi_mean_signal_std}
-    return {"ftsnr": ftsnr, "roi_mean_signal_std": roi_mean_signal_std}
+        return {
+            "ftsnr": 0.0,
+            "roi_mean_signal_std": roi_mean_signal_std,
+            "roi_mean_tr_spike_metrics": spike_block,
+        }
+    return {
+        "ftsnr": ftsnr,
+        "roi_mean_signal_std": roi_mean_signal_std,
+        "roi_mean_tr_spike_metrics": spike_block,
+    }
 
 
 def _analysis_roi_mask_for_summary(
@@ -1036,7 +1133,7 @@ def run_analysis(
     threshold: float = 0.25,
     erosion_voxels: int = 2,
     write_tmean_tstd: bool = False,
-    first_timepoint: int = 1,
+    first_timepoint: int = 2,
     last_timepoint: Optional[int] = None,
     mask_maps: bool = True,
 ) -> Tuple[Path, Path, List[Path]]:
@@ -1057,8 +1154,8 @@ def run_analysis(
         write_tmean_tstd (bool): When True, write optional `{basename}_Tmean.nii.gz`
             and `{basename}_Tstd.nii.gz` maps for troubleshooting (off by default).
         first_timepoint (int): 0-based index of the first volume to include. Default
-            ``1`` drops the first volume to reduce non-steady-state transient effects
-            in fMRI signal. Use ``0`` to include all volumes from the start of the series.
+            ``2`` drops the first two volumes to reduce non-steady-state transient effects
+            in fMRI signal. Use ``0`` to include from the first volume, or ``1`` to drop only the first.
         last_timepoint (Optional[int]): 0-based index of the last volume to include,
             or ``None`` for the final volume in the file.
         mask_maps (bool): When True (default), set NIfTI map voxels outside the ROI
@@ -1213,12 +1310,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--first-timepoint",
         type=int,
-        default=1,
+        default=2,
         metavar="IDX",
         help=(
-            "0-based index of first volume to include (default: 1 drops the first "
-            "volume to reduce non-steady-state transient effects in fMRI signal; "
-            "like legacy 2..- on the time axis; use 0 to include from the first volume)"
+            "0-based index of first volume to include (default: 2 drops the first two "
+            "volumes to reduce non-steady-state transient effects; use 0 or 1 for a shorter lead-in)"
         ),
     )
     parser.add_argument(
