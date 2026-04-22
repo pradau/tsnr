@@ -53,6 +53,13 @@ def _write_stats(
     pct_tr_abs_robust_z_gt_3: float = 0.0,
     n_tr_abs_robust_z_gt_3: float = 0.0,
     robust_z_len: int = 12,
+    include_slice_metrics: bool = True,
+    worst_slice_spike_pct_robust_z_lt_minus4: float = 12.5,
+    worst_slice_spike_min_robust_z: float = -6.2,
+    worst_slice_spike_pct_slice_index: int = 4,
+    worst_slice_spike_min_slice_index: int = 7,
+    n_slices_with_roi: int = 24,
+    n_slices_eligible: int = 18,
 ) -> None:
     """Write a minimal stats payload used by plotting code.
     Args:
@@ -80,6 +87,15 @@ def _write_stats(
             "roi_mean_signal_per_tr": [1000.0 + 0.5 * float(i) for i in range(robust_z_len)],
         },
     }
+    if include_slice_metrics:
+        payload["slice_ftsnr_metrics"] = {
+            "worst_slice_spike_pct_robust_z_lt_minus4": float(worst_slice_spike_pct_robust_z_lt_minus4),
+            "worst_slice_spike_min_robust_z": float(worst_slice_spike_min_robust_z),
+            "worst_slice_spike_pct_slice_index": int(worst_slice_spike_pct_slice_index),
+            "worst_slice_spike_min_slice_index": int(worst_slice_spike_min_slice_index),
+            "n_slices_with_roi": int(n_slices_with_roi),
+            "n_slices_eligible": int(n_slices_eligible),
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -199,10 +215,11 @@ def test_run_report_creates_png_and_csv(tmp_path: Path) -> None:
     root = _make_dataset(tmp_path)
     out_dir = tmp_path / "reports" / "tsnr_plots"
     generated = run_report(root, out_dir=out_dir, error_mode="ci95", group_by_task=False)
-    assert len(generated) == 3
+    assert len(generated) == 4
     expected = [
         out_dir / "metrics_panel_by_echo_ci95.png",
         out_dir / "spike_metrics_panel_by_echo_ci95.png",
+        out_dir / "slice_metrics_panel_by_echo_ci95.png",
         out_dir / "aggregated_metric_summary.csv",
     ]
     for path in expected:
@@ -273,7 +290,37 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
     assert "task-partlycloudy" in text
     assert "ftsnr,sub-3334,ses-1a,echo-1,task-laluna," in text
     assert "max_abs_robust_z,sub-3334,ses-1a,echo-1,task-laluna," in text
+    assert "worst_slice_spike_pct_robust_z_lt_minus4,sub-3334,ses-1a,echo-1,task-laluna," in text
+    assert "worst_slice_spike_min_slice_index,sub-3334,ses-1a,echo-1,task-laluna," in text
     assert (out_dir / "spike_metrics_panel_by_echo_sem.png").exists()
+    assert (out_dir / "slice_metrics_panel_by_echo_sem.png").exists()
+
+
+def test_run_report_skips_slice_plots_when_missing_slice_metrics(tmp_path: Path) -> None:
+    """Older stats without slice block still produce core plots and CSV."""
+    root = tmp_path / "bids"
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-1_bold_tsnr_stats.json",
+        80.0,
+        10.0,
+        120.0,
+        0.85,
+        include_slice_metrics=False,
+    )
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-2_bold_tsnr_stats.json",
+        70.0,
+        11.0,
+        110.0,
+        0.90,
+        include_slice_metrics=False,
+    )
+    out_dir = tmp_path / "reports" / "tsnr_plots"
+    generated = run_report(root, out_dir=out_dir, error_mode="sem", group_by_task=False)
+    assert (out_dir / "metrics_panel_by_echo_sem.png") in generated
+    assert (out_dir / "spike_metrics_panel_by_echo_sem.png") in generated
+    assert (out_dir / "aggregated_metric_summary.csv") in generated
+    assert (out_dir / "slice_metrics_panel_by_echo_sem.png") not in generated
 
 
 def test_discover_subject_sessions_sorted_pairs(tmp_path: Path) -> None:

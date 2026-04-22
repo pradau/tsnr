@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -941,6 +941,126 @@ def compute_ftsnr_metrics(data_4d: np.ndarray, roi_mask: np.ndarray) -> Dict[str
     }
 
 
+def _eligible_slice_indices(
+    slice_voxel_counts: Sequence[int],
+    min_voxels_floor: int = 50,
+    min_voxels_ratio: float = 0.40,
+) -> Tuple[List[int], int]:
+    """Determine z-slices eligible for slice-level spike analysis.
+    Args:
+        slice_voxel_counts (Sequence[int]): ROI voxel counts for every z slice.
+        min_voxels_floor (int): Minimum absolute voxel count for eligibility.
+        min_voxels_ratio (float): Minimum ratio of the max supported slice.
+    Returns:
+        Tuple[List[int], int]: Eligible z indices and the integer voxel-count threshold.
+    """
+    if min_voxels_floor < 1:
+        raise ValueError("min_voxels_floor must be >= 1")
+    if not (0.0 < min_voxels_ratio <= 1.0):
+        raise ValueError("min_voxels_ratio must be within (0, 1]")
+    max_slice_vox = int(max(slice_voxel_counts)) if slice_voxel_counts else 0
+    threshold = int(max(min_voxels_floor, np.ceil(min_voxels_ratio * float(max_slice_vox))))
+    eligible = [idx for idx, n_vox in enumerate(slice_voxel_counts) if int(n_vox) >= threshold]
+    return eligible, threshold
+
+
+def compute_slice_ftsnr_metrics(
+    data_4d: np.ndarray,
+    roi_mask: np.ndarray,
+    min_voxels_floor: int = 50,
+    min_voxels_ratio: float = 0.40,
+) -> Dict[str, Any]:
+    """Compute z-slice robust-z spike metrics for localized artifact detection.
+    Args:
+        data_4d (np.ndarray): Shape ``(x, y, z, t)`` after timepoint selection.
+        roi_mask (np.ndarray): Boolean ROI mask shaped ``(x, y, z)``.
+        min_voxels_floor (int): Eligibility floor for ROI voxels per z-slice.
+        min_voxels_ratio (float): Eligibility ratio versus the max-supported slice.
+    Returns:
+        Dict[str, Any]: Slice-level negative-spike metrics and per-slice details.
+    """
+    z_dim = int(data_4d.shape[2])
+    slice_voxel_counts: List[int] = [int(np.count_nonzero(roi_mask[:, :, z])) for z in range(z_dim)]
+    n_slices_with_roi = int(sum(1 for n in slice_voxel_counts if n > 0))
+    eligible_indices, voxel_threshold = _eligible_slice_indices(
+        slice_voxel_counts,
+        min_voxels_floor=min_voxels_floor,
+        min_voxels_ratio=min_voxels_ratio,
+    )
+    # Stricter than TR-level outlier default: % ranking uses z < -4 only.
+    slice_neg_count_z: float = 4.0
+
+    per_slice: List[Dict[str, Any]] = []
+    eligible_rows: List[Dict[str, Any]] = []
+    for z in range(z_dim):
+        n_vox = int(slice_voxel_counts[z])
+        eligible = z in eligible_indices
+        empty_spike = compute_roi_tr_spike_metrics(np.array([], dtype=np.float64))
+        row: Dict[str, Any] = {
+            "slice_index": int(z),
+            "n_voxels": n_vox,
+            "eligible": bool(eligible),
+            "slice_roi_mean_tr_spike_metrics": empty_spike,
+            "slice_n_robust_z_lt_minus4": 0,
+            "slice_pct_robust_z_lt_minus4": 0.0,
+            "slice_min_robust_z": 0.0,
+        }
+        if n_vox > 0:
+            slice_mask = roi_mask[:, :, z]
+            roi_ts = data_4d[:, :, z, :][slice_mask]
+            roi_mean_series = np.mean(roi_ts, axis=0)
+            spike_block = compute_roi_tr_spike_metrics(roi_mean_series)
+            robust_z = np.asarray(spike_block.get("robust_z_per_tr", []), dtype=np.float64)
+            n_neg = int(np.sum(robust_z < -slice_neg_count_z)) if robust_z.size > 0 else 0
+            pct_neg = (100.0 * float(n_neg) / float(robust_z.size)) if robust_z.size > 0 else 0.0
+            min_neg = float(np.min(robust_z)) if robust_z.size > 0 else 0.0
+            row["slice_roi_mean_tr_spike_metrics"] = spike_block
+            row["slice_n_robust_z_lt_minus4"] = n_neg
+            row["slice_pct_robust_z_lt_minus4"] = pct_neg
+            row["slice_min_robust_z"] = min_neg
+        per_slice.append(row)
+        if eligible:
+            eligible_rows.append(row)
+
+    if eligible_rows:
+        worst_pct_row = max(
+            eligible_rows,
+            key=lambda r: (float(r["slice_pct_robust_z_lt_minus4"]), -float(r["slice_min_robust_z"])),
+        )
+        worst_max_row = min(eligible_rows, key=lambda r: float(r["slice_min_robust_z"]))
+        worst_slice_spike_pct_slice_index = int(worst_pct_row["slice_index"])
+        worst_slice_spike_min_slice_index = int(worst_max_row["slice_index"])
+        worst_slice_spike_pct_robust_z_lt_minus4 = float(worst_pct_row["slice_pct_robust_z_lt_minus4"])
+        worst_slice_spike_min_robust_z = float(worst_max_row["slice_min_robust_z"])
+    else:
+        worst_slice_spike_pct_slice_index = -1
+        worst_slice_spike_min_slice_index = -1
+        worst_slice_spike_pct_robust_z_lt_minus4 = 0.0
+        worst_slice_spike_min_robust_z = 0.0
+
+    return {
+        "axis": "z",
+        "n_slices_total": z_dim,
+        "n_slices_with_roi": n_slices_with_roi,
+        "n_slices_eligible": int(len(eligible_indices)),
+        "eligibility_rule": {
+            "min_voxels_floor": int(min_voxels_floor),
+            "min_voxels_ratio_of_max_slice": float(min_voxels_ratio),
+            "computed_min_voxels_threshold": int(voxel_threshold),
+        },
+        "slice_negative_spike_count_z_threshold": float(slice_neg_count_z),
+        "worst_slice_spike_pct_slice_index": worst_slice_spike_pct_slice_index,
+        "worst_slice_spike_pct_robust_z_lt_minus4": worst_slice_spike_pct_robust_z_lt_minus4,
+        "worst_slice_spike_min_slice_index": worst_slice_spike_min_slice_index,
+        "worst_slice_spike_min_robust_z": worst_slice_spike_min_robust_z,
+        "same_slice_for_both_spike_flags": bool(
+            worst_slice_spike_pct_slice_index >= 0
+            and worst_slice_spike_pct_slice_index == worst_slice_spike_min_slice_index
+        ),
+        "per_slice": per_slice,
+    }
+
+
 def _analysis_roi_mask_for_summary(
     mode: str,
     volume_shape_3d: Tuple[int, int, int],
@@ -1020,6 +1140,8 @@ def save_outputs(
     write_tmean_tstd: bool,
     mask_maps: bool = True,
     brain_mask_override: Optional[np.ndarray] = None,
+    slice_min_voxels_floor: int = 50,
+    slice_min_voxels_ratio: float = 0.40,
 ) -> Tuple[Path, Path, List[Path]]:
     """Write map and JSON outputs.
     Args:
@@ -1042,6 +1164,8 @@ def save_outputs(
         brain_mask_override (Optional[np.ndarray]): For ``brain`` mode, optional
             boolean mask (same shape as ``mean_volume``) to use instead of
             recomputing the intensity-based mask.
+        slice_min_voxels_floor (int): Slice-level spike eligibility floor.
+        slice_min_voxels_ratio (float): Slice-level eligibility ratio of max slice support.
     Returns:
         Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_map_paths)`.
     """
@@ -1058,6 +1182,14 @@ def save_outputs(
         brain_mask_override,
     )
     ft_metrics = compute_ftsnr_metrics(data_4d, analysis_roi_mask)
+    slice_ft_metrics: Optional[Dict[str, Any]] = None
+    if mode == "brain":
+        slice_ft_metrics = compute_slice_ftsnr_metrics(
+            data_4d,
+            analysis_roi_mask,
+            min_voxels_floor=slice_min_voxels_floor,
+            min_voxels_ratio=slice_min_voxels_ratio,
+        )
 
     output_map_censoring = "full_fov"
     tsnr_save = tsnr_map
@@ -1120,6 +1252,8 @@ def save_outputs(
         "timepoint_selection": timepoint_selection,
         "parameters": parameters,
     }
+    if slice_ft_metrics is not None:
+        payload["slice_ftsnr_metrics"] = slice_ft_metrics
     stats_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return map_path, stats_path, optional_paths
 
@@ -1136,6 +1270,8 @@ def run_analysis(
     first_timepoint: int = 2,
     last_timepoint: Optional[int] = None,
     mask_maps: bool = True,
+    slice_min_voxels_floor: int = 50,
+    slice_min_voxels_ratio: float = 0.40,
 ) -> Tuple[Path, Path, List[Path]]:
     """Run full tSNR analysis and write outputs.
     Args:
@@ -1160,6 +1296,8 @@ def run_analysis(
             or ``None`` for the final volume in the file.
         mask_maps (bool): When True (default), set NIfTI map voxels outside the ROI
             to NaN. Set False for full field-of-view maps.
+        slice_min_voxels_floor (int): Slice-level spike eligibility floor.
+        slice_min_voxels_ratio (float): Slice-level eligibility ratio of max slice support.
     Returns:
         Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_intermediate_paths)`.
     Raises:
@@ -1281,6 +1419,8 @@ def run_analysis(
         write_tmean_tstd=write_tmean_tstd,
         mask_maps=mask_maps,
         brain_mask_override=brain_mask_override,
+        slice_min_voxels_floor=slice_min_voxels_floor,
+        slice_min_voxels_ratio=slice_min_voxels_ratio,
     )
 
 
@@ -1338,6 +1478,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="When input is a directory, glob pattern for NIfTIs (default: *_bold.nii.gz "
         "and *_bold.nii). Use a single pattern, e.g. *_task-rest_*.nii.gz",
     )
+    parser.add_argument(
+        "--slice-min-voxels-floor",
+        type=int,
+        default=50,
+        help="Minimum ROI voxels required for a z-slice to be eligible for slice spike ranking.",
+    )
+    parser.add_argument(
+        "--slice-min-voxels-ratio",
+        type=float,
+        default=0.40,
+        help="Minimum eligible slice support as ratio of max slice ROI support (0,1].",
+    )
     return parser
 
 
@@ -1361,6 +1513,8 @@ def _run_one_analysis_from_cli(args: argparse.Namespace, input_path: Path) -> No
         first_timepoint=args.first_timepoint,
         last_timepoint=args.last_timepoint,
         mask_maps=not args.full_fov_maps,
+        slice_min_voxels_floor=args.slice_min_voxels_floor,
+        slice_min_voxels_ratio=args.slice_min_voxels_ratio,
     )
 
 

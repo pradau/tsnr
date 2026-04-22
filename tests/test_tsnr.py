@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tsnr import (
     cli,
+    compute_slice_ftsnr_metrics,
     compute_roi_tr_spike_metrics,
     compute_tsnr_map,
     default_output_dir_for_input,
@@ -483,6 +484,59 @@ def test_brain_masking_json_when_t1_pipeline_fails(tmp_path: Path) -> None:
     assert "synthetic FSL failure" in (bm["detail"] or "")
 
 
+def test_compute_slice_ftsnr_metrics_excludes_low_support_slices() -> None:
+    """Low-support edge slices are excluded by voxel-threshold eligibility rule."""
+    data = np.ones((9, 9, 6, 6), dtype=np.float64) * 100.0
+    for ti in range(data.shape[3]):
+        data[:, :, :, ti] += float(ti)
+    roi_mask = np.zeros((9, 9, 6), dtype=bool)
+    roi_mask[:, :, 2:4] = True
+    roi_mask[:2, :2, 0] = True
+
+    out = compute_slice_ftsnr_metrics(data, roi_mask)
+    assert out["n_slices_total"] == 6
+    assert out["n_slices_with_roi"] == 3
+    assert out["n_slices_eligible"] == 2
+    assert out["eligibility_rule"]["computed_min_voxels_threshold"] == 50
+    per = {int(row["slice_index"]): row for row in out["per_slice"]}
+    assert bool(per[0]["eligible"]) is False
+    assert bool(per[2]["eligible"]) is True
+    assert bool(per[3]["eligible"]) is True
+
+
+def test_brain_slice_ftsnr_metrics_flags_corrupted_slice(tmp_path: Path) -> None:
+    """Brain-mode stats include slice spike metrics and detect the artifact slice."""
+    data = np.zeros((11, 11, 5, 20), dtype=np.float64)
+    data[2:9, 2:9, 1:4, :] = 100.0
+    for ti in range(data.shape[3]):
+        data[2:9, 2:9, 1:4, ti] += 0.25 * float(ti)
+    data[2:9, 2:9, 2, 10] -= 80.0
+    data[2:9, 2:9, 2, 11] += 80.0
+    input_path = tmp_path / "brain_slice_artifact.nii.gz"
+    write_nifti(input_path, data)
+
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="brain",
+        threshold=0.25,
+        erosion_voxels=0,
+        first_timepoint=0,
+        slice_min_voxels_floor=25,
+        slice_min_voxels_ratio=0.20,
+    )
+    stats = load_stats(stats_path)
+    assert "slice_ftsnr_metrics" in stats
+    sf = stats["slice_ftsnr_metrics"]
+    assert sf["axis"] == "z"
+    assert sf["n_slices_eligible"] >= 2
+    assert int(sf["worst_slice_spike_pct_slice_index"]) == 2
+    assert int(sf["worst_slice_spike_min_slice_index"]) == 2
+    assert bool(sf["same_slice_for_both_spike_flags"]) is True
+    per_slice = {int(row["slice_index"]): row for row in sf["per_slice"]}
+    assert float(per_slice[2]["slice_pct_robust_z_lt_minus4"]) > float(per_slice[1]["slice_pct_robust_z_lt_minus4"])
+    assert float(per_slice[2]["slice_min_robust_z"]) < float(per_slice[1]["slice_min_robust_z"])
+
+
 def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
     """
     Constant series yields zero tSNR and finite output.
@@ -643,6 +697,7 @@ def test_json_contract_fields_present(tmp_path: Path) -> None:
     assert stats["timepoint_selection"]["n_timepoints_used"] == 4
     assert stats["output_map_censoring"] == "roi_masked"
     assert "ftsnr" in stats and "roi_mean_signal_std" in stats
+    assert "slice_ftsnr_metrics" not in stats
 
 
 def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None:

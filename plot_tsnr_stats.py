@@ -23,6 +23,20 @@ import numpy as np
 
 
 METRICS: Tuple[str, ...] = ("ftsnr", "roi_mean_signal_std", "tsnr_mean")
+SLICE_METRICS: Tuple[str, ...] = (
+    "worst_slice_spike_pct_robust_z_lt_minus4",
+    "worst_slice_spike_min_robust_z",
+)
+SLICE_INDEX_METRICS: Tuple[str, ...] = (
+    "worst_slice_spike_pct_slice_index",
+    "worst_slice_spike_min_slice_index",
+)
+SLICE_NON_SCALAR_KEYS: Tuple[str, ...] = (
+    "axis",
+    "eligibility_rule",
+    "per_slice",
+    "slice_negative_spike_count_z_threshold",
+)
 SPIKE_METRICS: Tuple[str, ...] = (
     "max_abs_robust_z",
     "pct_tr_abs_robust_z_gt_3",
@@ -35,6 +49,12 @@ METRIC_YLABEL: Dict[str, str] = {
     "max_abs_robust_z": "max |robust z| (ROI mean TR)",
     "pct_tr_abs_robust_z_gt_3": "% TRs with |robust z| > 3",
     "n_tr_abs_robust_z_gt_3": "TR count with |robust z| > 3",
+    "worst_slice_spike_pct_robust_z_lt_minus4": "worst-slice % TRs with robust z < -4",
+    "worst_slice_spike_min_robust_z": "worst-slice minimum robust z",
+    "worst_slice_spike_pct_slice_index": "worst spike-rate slice index (Z)",
+    "worst_slice_spike_min_slice_index": "min robust z slice index (Z)",
+    "n_slices_with_roi": "slice count with ROI support",
+    "n_slices_eligible": "eligible slice count",
 }
 ERROR_BAR_CHOICES: Tuple[str, ...] = ("sd", "sem", "ci95")
 
@@ -158,6 +178,29 @@ def load_metric_rows(stats_paths: Sequence[Path]) -> List[Dict[str, object]]:
                 row["has_spike_metrics"] = True
             else:
                 row["has_spike_metrics"] = False
+            slice_block = payload.get("slice_ftsnr_metrics")
+            if isinstance(slice_block, dict):
+                missing_slice_keys = [k for k in SLICE_METRICS if slice_block.get(k) is None]
+                if missing_slice_keys:
+                    raise ValueError(
+                        f"slice_ftsnr_metrics missing keys {missing_slice_keys} in {stats_path}"
+                    )
+                for key in SLICE_METRICS:
+                    fv = float(slice_block[key])
+                    if not math.isfinite(fv):
+                        raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                    row[key] = fv
+                for key, value in slice_block.items():
+                    if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
+                        continue
+                    if isinstance(value, (int, float)):
+                        fv = float(value)
+                        if not math.isfinite(fv):
+                            raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                        row[key] = fv
+                row["has_slice_metrics"] = True
+            else:
+                row["has_slice_metrics"] = False
             rows.append(row)
         except (ValueError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             print(f"Warning: skipping {stats_path}: {exc}")
@@ -356,6 +399,8 @@ def _plot_metric_on_axis(
     error_mode: str,
     group_by_task: bool,
     show_error_bars: bool,
+    point_annotations: Optional[Dict[Tuple[str, str], str]] = None,
+    subtitle_note: Optional[str] = None,
 ) -> None:
     """Render one metric on a provided matplotlib axis.
     Args:
@@ -410,6 +455,20 @@ def _plot_metric_on_axis(
                 linewidth=1.8,
                 label=label,
             )
+        if point_annotations is not None:
+            y_span = max(float(np.max(y_vals) - np.min(y_vals)), 1e-9)
+            offset = 0.02 * y_span
+            for row, x_val, y_val in zip(group_rows, x_pos, y_vals):
+                ann = point_annotations.get((label, str(row["echo"])))
+                if ann:
+                    axis.text(
+                        float(x_val),
+                        float(y_val) + offset,
+                        ann,
+                        fontsize=8,
+                        ha="center",
+                        va="bottom",
+                    )
 
     axis.set_xticks(np.arange(len(x_labels_all), dtype=np.float64))
     axis.set_xticklabels(x_labels_all)
@@ -417,9 +476,13 @@ def _plot_metric_on_axis(
     axis.set_ylabel(METRIC_YLABEL.get(metric, metric))
     ylabel = METRIC_YLABEL.get(metric, metric)
     if show_error_bars:
-        axis.set_title(f"{ylabel} ({error_mode} error bars; {n_label})")
+        base_title = f"{ylabel} ({error_mode} error bars; {n_label})"
     else:
-        axis.set_title(f"{ylabel} (mean; no error bars; {n_label})")
+        base_title = f"{ylabel} ({n_label})"
+    if subtitle_note:
+        axis.set_title(f"{base_title}; {subtitle_note}")
+    else:
+        axis.set_title(base_title)
     axis.grid(True, linestyle="--", alpha=0.4)
     axis.legend()
 
@@ -438,8 +501,9 @@ def _panel_suptitle(
         filters.append(session)
     scope = " | ".join(filters) if filters else "all subjects/sessions"
     split = "session+task lines" if group_by_task else "session lines"
-    err = "with error bars" if show_error_bars else "no error bars"
-    return f"tSNR/fTSNR summary across echoes ({scope}; {split}; {err})"
+    if show_error_bars:
+        return f"tSNR/fTSNR summary across echoes ({scope}; {split}; with error bars)"
+    return f"tSNR/fTSNR summary across echoes ({scope}; {split})"
 
 
 def _spike_panel_suptitle(
@@ -456,8 +520,100 @@ def _spike_panel_suptitle(
         filters.append(session)
     scope = " | ".join(filters) if filters else "all subjects/sessions"
     split = "session+task lines" if group_by_task else "session lines"
-    err = "with error bars" if show_error_bars else "no error bars"
-    return f"ROI mean TR spike metrics (robust z) across echoes ({scope}; {split}; {err})"
+    if show_error_bars:
+        return f"ROI mean TR spike metrics (robust z) across echoes ({scope}; {split}; with error bars)"
+    return f"ROI mean TR spike metrics (robust z) across echoes ({scope}; {split})"
+
+
+def _slice_panel_suptitle(
+    subject: Optional[str],
+    session: Optional[str],
+    group_by_task: bool,
+    show_error_bars: bool = True,
+) -> str:
+    """Build slice-panel title with optional dataset filters."""
+    filters: List[str] = []
+    if subject is not None:
+        filters.append(subject)
+    if session is not None:
+        filters.append(session)
+    scope = " | ".join(filters) if filters else "all subjects/sessions"
+    split = "session+task lines" if group_by_task else "session lines"
+    if show_error_bars:
+        return f"Slice-level spike summary across echoes ({scope}; {split}; with error bars)"
+    return f"Slice-level spike summary across echoes ({scope}; {split})"
+
+
+def _slice_annotation_lookup(
+    aggregated_rows: Sequence[Dict[str, object]],
+    annotation_metric: str,
+    group_by_task: bool,
+) -> Dict[Tuple[str, str], str]:
+    """Build per-point slice-index labels ``Z=12`` (capital Z), keyed by (line_label, echo)."""
+    out: Dict[Tuple[str, str], str] = {}
+    key = f"{annotation_metric}_mean"
+    for row in aggregated_rows:
+        if key not in row:
+            continue
+        slice_index = int(round(float(row[key])))
+        out[(_session_label(row, group_by_task), str(row["echo"]))] = f"Z={slice_index}"
+    return out
+
+
+def plot_slice_metric_panel(
+    aggregated_by_metric: Dict[str, Sequence[Dict[str, object]]],
+    error_mode: str,
+    output_path: Path,
+    group_by_task: bool,
+    subject: Optional[str],
+    session: Optional[str],
+    show_error_bars: bool,
+) -> None:
+    """Render two-panel slice summary with Z-index annotations on points."""
+    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=False)
+    top_ann = _slice_annotation_lookup(
+        aggregated_by_metric.get("worst_slice_spike_pct_slice_index", []),
+        annotation_metric="worst_slice_spike_pct_slice_index",
+        group_by_task=group_by_task,
+    )
+    bottom_ann = _slice_annotation_lookup(
+        aggregated_by_metric.get("worst_slice_spike_min_slice_index", []),
+        annotation_metric="worst_slice_spike_min_slice_index",
+        group_by_task=group_by_task,
+    )
+    _plot_metric_on_axis(
+        axes[0],
+        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_pct_robust_z_lt_minus4", []),
+        metric="worst_slice_spike_pct_robust_z_lt_minus4",
+        error_mode=error_mode,
+        group_by_task=group_by_task,
+        show_error_bars=show_error_bars,
+        point_annotations=top_ann,
+        subtitle_note="Z=slice for worst % (robust z < -4)",
+    )
+    _plot_metric_on_axis(
+        axes[1],
+        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_min_robust_z", []),
+        metric="worst_slice_spike_min_robust_z",
+        error_mode=error_mode,
+        group_by_task=group_by_task,
+        show_error_bars=show_error_bars,
+        point_annotations=bottom_ann,
+        subtitle_note="Z=slice for min robust z (y-axis)",
+    )
+    fig.suptitle(
+        _slice_panel_suptitle(
+            subject=subject,
+            session=session,
+            group_by_task=group_by_task,
+            show_error_bars=show_error_bars,
+        ),
+        fontsize=14,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
 
 
 def plot_metric_panel(
@@ -833,6 +989,7 @@ def run_report(
     generated.append(panel_path)
 
     has_all_spikes = bool(rows) and all(bool(r.get("has_spike_metrics")) for r in rows)
+    has_all_slice_metrics = bool(rows) and all(bool(r.get("has_slice_metrics")) for r in rows)
     csv_metric_names: List[str] = list(METRICS)
     if has_all_spikes:
         for metric in SPIKE_METRICS:
@@ -858,6 +1015,28 @@ def run_report(
         print(
             "Warning: skipping spike metric plots and CSV rows (not every stats JSON "
             "includes roi_mean_tr_spike_metrics with all required keys)."
+        )
+    if has_all_slice_metrics:
+        for metric in SLICE_METRICS + SLICE_INDEX_METRICS:
+            aggregated_by_metric[metric] = aggregate_metric_rows(
+                rows, metric=metric, error_mode=error_mode, group_by_task=group_by_task
+            )
+        slice_path = out_dir / f"slice_metrics_panel_by_echo_{error_mode}.png"
+        plot_slice_metric_panel(
+            aggregated_by_metric=aggregated_by_metric,
+            error_mode=error_mode,
+            output_path=slice_path,
+            group_by_task=group_by_task,
+            subject=subject,
+            session=session,
+            show_error_bars=show_error_bars,
+        )
+        generated.append(slice_path)
+        csv_metric_names.extend(SLICE_METRICS + SLICE_INDEX_METRICS)
+    else:
+        print(
+            "Warning: skipping slice metric plots and CSV rows (not every stats JSON "
+            "includes slice_ftsnr_metrics with all required keys)."
         )
 
     csv_path = out_dir / "aggregated_metric_summary.csv"

@@ -79,6 +79,7 @@ Useful options:
 - `--write-tmean-tstd`: also write temporal mean and standard deviation maps (`*_Tmean.nii.gz`, `*_Tstd.nii.gz`).
 - `--full-fov-maps`: do not NaN voxels outside the ROI in written maps.
 - `--input-pattern`: when `input` is a directory, override the default `*_bold.nii.gz` / `*_bold.nii` discovery with one glob.
+- `--slice-min-voxels-floor` / `--slice-min-voxels-ratio`: tune z-slice eligibility for `slice_ftsnr_metrics` (brain mode defaults: floor **50**, ratio **0.40**).
 
 ## Inputs
 
@@ -112,6 +113,7 @@ Basename rules:
   - `tsnr_std` is the spatial standard deviation of per-voxel tSNR across the ROI.
   - `roi_mean_signal_std` is the temporal standard deviation of the ROI-mean fMRI signal across frames (signal units, suitable for longitudinal plot error bars). `ftsnr` is the mean of that ROI-mean series divided by `roi_mean_signal_std`.
   - `roi_mean_tr_spike_metrics`: see **ROI mean TR spike metrics** below.
+  - `slice_ftsnr_metrics` (brain mode): per-z-slice negative-spike summary for localized dropout detection; see **Slice-level metrics** below.
 - `map_affine_source`, `output_map_censoring`
 - Mode-specific `parameters` (see below)
 
@@ -130,6 +132,28 @@ Typical JSON keys (see your stats file for the exact set): `n_timepoints`, `meth
 - **`roi_mean_signal_per_tr`:** ROI-mean signal value per TR (same order and length as `robust_z_per_tr` when present). Stored so **TR-index figures** can apply a **linear detrend** before robust z without changing any other reported statistics. Omitted in older JSON; refresh with current `tsnr.py`.
 
 High counts or large `max_abs_*` values point to TRs with unusually high or low whole-ROI signal relative to the rest of the run (for example motion spikes, acquisition glitches, or extreme signal dropouts).
+
+#### Slice-level metrics (`slice_ftsnr_metrics`, brain mode)
+
+This block flags slices with **large negative** robust-z events on the **slice ROI-mean time course** (same voxels and **same `timepoint_selection`** as the rest of the run). Whole-brain `ftsnr` can miss slice-local dropout.
+
+- Axis is fixed to `z` (slice direction of the internal `(x, y, z, t)` array).
+- For each slice with ROI voxels, the tool computes `slice_roi_mean_tr_spike_metrics` (same robust-z machinery as **ROI mean TR spike metrics**, applied to that slice’s ROI-mean series). It also stores flat helpers:
+  - `slice_n_robust_z_lt_minus4`, `slice_pct_robust_z_lt_minus4`: count and **percentage** of TRs with **robust z &lt; -4** (stricter than the TR-level `|z|>3` rule).
+  - `slice_min_robust_z`: minimum signed robust z on that slice (most negative).
+- Eligibility avoids thin edge slices:
+  - Default: `n_voxels >= max(50, 0.40 * max_slice_voxel_count)`.
+  - Override with **`--slice-min-voxels-floor`** and **`--slice-min-voxels-ratio`** on `tsnr.py`.
+  - The resolved threshold is in `eligibility_rule.computed_min_voxels_threshold`.
+- `slice_negative_spike_count_z_threshold` records the **4.0** cutoff used for the `%` / count fields above.
+
+Top-level fields in `slice_ftsnr_metrics` include:
+
+- `n_slices_total`, `n_slices_with_roi`, `n_slices_eligible`, `eligibility_rule`
+- `worst_slice_spike_pct_slice_index`, `worst_slice_spike_pct_robust_z_lt_minus4` (eligible slice with highest `%` TRs with z &lt; -4; tie-break by more negative `slice_min_robust_z`)
+- `worst_slice_spike_min_slice_index`, `worst_slice_spike_min_robust_z` (eligible slice with most negative `slice_min_robust_z`)
+- `same_slice_for_both_spike_flags`
+- `per_slice`: one row per z-slice with `slice_index`, `n_voxels`, `eligible`, the flat spike helpers above, and `slice_roi_mean_tr_spike_metrics`
 
 ## Mode Notes
 
@@ -233,6 +257,7 @@ Expected inputs:
 - Stats files under `sub-*/ses-*/derivatives/tsnr/*_tsnr_stats.json`
 - Filenames should include BIDS entities used for grouping: `sub-*`, `ses-*`, `task-*`, `echo-*`
 - Required JSON metrics: `tsnr_mean`, `tsnr_std`, `ftsnr`, `roi_mean_signal_std`
+- Optional slice metrics: if every stats JSON includes `slice_ftsnr_metrics` with `worst_slice_spike_pct_robust_z_lt_minus4` and `worst_slice_spike_min_robust_z`, an additional slice-metrics panel is produced (see **Slice-level metrics**).
 - Optional spike QC: if **every** stats file includes `roi_mean_tr_spike_metrics` with `max_abs_robust_z`, `pct_tr_abs_robust_z_gt_3`, and `n_tr_abs_robust_z_gt_3`, a second figure and extra CSV rows are produced (see below).
 - **`--robust-z-tr-panels`** (requires **`--subject`** and **`--session`**): writes **`robust_z_vs_tr_<subject>_<session>.png`**, a multi-panel figure of **robust z vs TR index** with **one subplot per `*_tsnr_stats.json`** in that session (for example eight panels when there are eight BOLD-derived stats files). When **`roi_mean_signal_per_tr`** is in the JSON (current `tsnr.py`), the plotter **linearly detrends** that ROI-mean series **then** applies the same robust-z rule (**only for this figure**; echo panels and CSV still use undetrended spike metrics). Older stats without raw per-TR means fall back to plotting **`robust_z_per_tr`** from the file. Refresh stats with `uv run tsnr.py "<bids>/sub-.../ses-.../func" brain` if needed.
 
@@ -261,10 +286,11 @@ Outputs:
 
 - `metrics_panel_by_echo_<error>.png` (three subplots, top to bottom: `ftsnr`, `roi_mean_signal_std`, `tsnr_mean`; error bars only when enabled)
 - `spike_metrics_panel_by_echo_<error>.png` when all inputs carry spike metrics (three subplots: max |robust z|, % TRs with |robust z| > 3, TR count with |robust z| > 3; error bars only when enabled)
+- `slice_metrics_panel_by_echo_<error>.png` when all inputs carry slice metrics (two subplots: worst-slice **% TRs with robust z &lt; -4**, and worst-slice **minimum robust z**; point labels **`Z=…`** are **slice indices**, not z-scores; error bars only when enabled)
 - `robust_z_vs_tr_<subject>_<session>.png` when `--robust-z-tr-panels` is set and per-TR data are present (linear detrend before z when `roi_mean_signal_per_tr` is stored)
 - `roi_mean_signal_vs_tr_<subject>_<session>.png` when `--roi-mean-signal-tr-panels` is set (raw ROI mean vs TR)
 - `aggregated_metric_summary.csv` in tidy long format:
   - columns: `metric,sub,ses,echo,task,n_runs,mean,error`
-  - one row per `(metric, ses, echo[, task])`; `metric` includes core summaries and, when available, the three spike fields above
+  - one row per `(metric, ses, echo[, task])`; `metric` includes core summaries and, when available, the three spike fields and four slice summary fields (`worst_slice_spike_pct_robust_z_lt_minus4`, `worst_slice_spike_min_robust_z`, and the two worst-slice index columns).
 
-When `--subject` and/or `--session` filters are provided, the panel title includes those labels.
+When `--subject` and/or `--session` filters are provided, the figure title includes those labels. Scanning `--bids-root` may print warnings for other subjects whose stats JSON predates the current schema; refresh those derivatives with `tsnr.py brain` or ignore the warnings if you filtered to one subject/session.
