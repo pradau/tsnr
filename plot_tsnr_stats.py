@@ -57,6 +57,7 @@ METRIC_YLABEL: Dict[str, str] = {
     "n_slices_eligible": "eligible slice count",
 }
 ERROR_BAR_CHOICES: Tuple[str, ...] = ("sd", "sem", "ci95")
+LABEL_BY_CHOICES: Tuple[str, ...] = ("auto", "metadata_date", "filename_date")
 
 
 def parse_bids_entities_from_name(stats_path: Path) -> Dict[str, str]:
@@ -98,6 +99,108 @@ def discover_stats_files(bids_root: Path) -> List[Path]:
         raise ValueError(f"--bids-root is not a directory: {bids_root}")
     paths = sorted(bids_root.glob("sub-*/ses-*/derivatives/tsnr/*_tsnr_stats.json"))
     return [p for p in paths if p.is_file()]
+
+
+def discover_phantom_stats_files(stats_dir: Path) -> List[Path]:
+    """Find phantom stats JSON files in one directory (non-recursive).
+    Args:
+        stats_dir (Path): Directory containing ``*_tsnr_stats.json`` files.
+    Returns:
+        List[Path]: Sorted stats paths.
+    Raises:
+        ValueError: If ``stats_dir`` is not a directory.
+    """
+    if not stats_dir.is_dir():
+        raise ValueError(f"--phantom-stats-dir is not a directory: {stats_dir}")
+    return sorted(p for p in stats_dir.glob("*_tsnr_stats.json") if p.is_file())
+
+
+def default_out_dir_for_phantom_stats_dir(stats_dir: Path) -> Path:
+    """Default phantom report directory, dataset-local when possible.
+    Args:
+        stats_dir (Path): Directory used with ``--phantom-stats-dir``.
+    Returns:
+        Path: Default report output directory.
+    """
+    if stats_dir.name == "tsnr" and stats_dir.parent.name == "derivatives":
+        return stats_dir.parent.parent / "reports" / "tsnr_plots"
+    return stats_dir.parent / "reports" / "tsnr_plots"
+
+
+def _date_from_text(text: str) -> Optional[str]:
+    """Extract ``YYYY-MM-DD`` from common ``YYYY_MM_DD``/``YYYY-MM-DD`` fragments.
+    Args:
+        text (str): Candidate text containing a date-like token.
+    Returns:
+        Optional[str]: Normalized date string, or ``None``.
+    """
+    match = re.search(r"(20\d{2})[_-](\d{2})[_-](\d{2})", text)
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _metadata_date_from_payload(payload: Dict[str, object]) -> Optional[str]:
+    """Best-effort QA date from stats JSON metadata fields.
+    Args:
+        payload (Dict[str, object]): One stats JSON payload.
+    Returns:
+        Optional[str]: Normalized ``YYYY-MM-DD`` date, or ``None``.
+    """
+    direct_keys = ("qa_session_date", "acquisition_date", "session_date")
+    for key in direct_keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            parsed = _date_from_text(value)
+            if parsed is not None:
+                return parsed
+    qa_meta = payload.get("qa_metadata")
+    if isinstance(qa_meta, dict):
+        for key in ("session_date", "acquisition_date", "snapshot_date"):
+            value = qa_meta.get(key)
+            if isinstance(value, str):
+                parsed = _date_from_text(value)
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def resolve_phantom_session_label(
+    payload: Dict[str, object],
+    stats_path: Path,
+    label_by: str,
+) -> str:
+    """Resolve plotting session label for phantom QA rows.
+    Args:
+        payload (Dict[str, object]): Stats JSON payload.
+        stats_path (Path): Stats JSON path.
+        label_by (str): One of ``auto``, ``metadata_date``, ``filename_date``.
+    Returns:
+        str: Label used as phantom QA session key.
+    """
+    metadata_date = _metadata_date_from_payload(payload)
+    input_file = payload.get("input_file")
+    input_name = Path(str(input_file)).name if isinstance(input_file, str) else ""
+    filename_date = _date_from_text(input_name) or _date_from_text(stats_path.name)
+
+    if label_by == "metadata_date":
+        if metadata_date is not None:
+            return metadata_date
+        if filename_date is not None:
+            print(f"Warning: metadata date missing in {stats_path}; using filename date {filename_date}.")
+            return filename_date
+    elif label_by == "filename_date":
+        if filename_date is not None:
+            return filename_date
+    else:
+        if metadata_date is not None:
+            return metadata_date
+        if filename_date is not None:
+            return filename_date
+
+    fallback = re.sub(r"_tsnr_stats\\.json$", "", stats_path.name)
+    print(f"Warning: could not resolve QA session date in {stats_path}; using {fallback}.")
+    return fallback
 
 
 def discover_subject_sessions(bids_root: Path) -> List[Tuple[str, str]]:
@@ -147,6 +250,91 @@ def load_metric_rows(stats_paths: Sequence[Path]) -> List[Dict[str, object]]:
                 "ses": entities["ses"],
                 "task": entities["task"],
                 "echo": entities["echo"],
+            }
+            for metric in METRICS:
+                value = payload.get(metric)
+                if value is None:
+                    raise ValueError(f"Missing required metric {metric} in {stats_path}")
+                fv = float(value)
+                if not math.isfinite(fv):
+                    raise ValueError(f"Non-finite metric {metric} in {stats_path}")
+                row[metric] = fv
+            tsnr_std = payload.get("tsnr_std")
+            if tsnr_std is None:
+                raise ValueError(f"Missing required metric tsnr_std in {stats_path}")
+            tsnr_std_f = float(tsnr_std)
+            if not math.isfinite(tsnr_std_f):
+                raise ValueError(f"Non-finite metric tsnr_std in {stats_path}")
+            row["tsnr_std"] = tsnr_std_f
+            spike_block = payload.get("roi_mean_tr_spike_metrics")
+            if isinstance(spike_block, dict):
+                missing = [k for k in SPIKE_METRICS if spike_block.get(k) is None]
+                if missing:
+                    raise ValueError(
+                        f"roi_mean_tr_spike_metrics missing keys {missing} in {stats_path}"
+                    )
+                for key in SPIKE_METRICS:
+                    fv = float(spike_block[key])
+                    if not math.isfinite(fv):
+                        raise ValueError(f"Non-finite spike metric {key} in {stats_path}")
+                    row[key] = fv
+                row["has_spike_metrics"] = True
+            else:
+                row["has_spike_metrics"] = False
+            slice_block = payload.get("slice_ftsnr_metrics")
+            if isinstance(slice_block, dict):
+                missing_slice_keys = [k for k in SLICE_METRICS if slice_block.get(k) is None]
+                if missing_slice_keys:
+                    raise ValueError(
+                        f"slice_ftsnr_metrics missing keys {missing_slice_keys} in {stats_path}"
+                    )
+                for key in SLICE_METRICS:
+                    fv = float(slice_block[key])
+                    if not math.isfinite(fv):
+                        raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                    row[key] = fv
+                for key, value in slice_block.items():
+                    if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
+                        continue
+                    if isinstance(value, (int, float)):
+                        fv = float(value)
+                        if not math.isfinite(fv):
+                            raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                        row[key] = fv
+                row["has_slice_metrics"] = True
+            else:
+                row["has_slice_metrics"] = False
+            rows.append(row)
+        except (ValueError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"Warning: skipping {stats_path}: {exc}")
+    return rows
+
+
+def load_phantom_metric_rows(
+    stats_paths: Sequence[Path],
+    label_by: str,
+) -> List[Dict[str, object]]:
+    """Load phantom rows for QA-session comparisons (non-BIDS naming).
+    Args:
+        stats_paths (Sequence[Path]): Phantom stats JSON paths.
+        label_by (str): Label source mode (``auto``, ``metadata_date``, ``filename_date``).
+    Returns:
+        List[Dict[str, object]]: Rows shaped for existing aggregation helpers.
+    """
+    rows: List[Dict[str, object]] = []
+    for stats_path in stats_paths:
+        try:
+            payload = _read_json(stats_path)
+            qa_session = resolve_phantom_session_label(payload, stats_path=stats_path, label_by=label_by)
+            run_id = re.sub(r"_tsnr_stats\\.json$", "", stats_path.name)
+            row: Dict[str, object] = {
+                "stats_path": str(stats_path),
+                "sub": "phantom",
+                "ses": "qa-series",
+                "task": run_id,
+                "echo": qa_session,
+                "qa_session": qa_session,
+                "run_id": run_id,
             }
             for metric in METRICS:
                 value = payload.get(metric)
@@ -401,6 +589,7 @@ def _plot_metric_on_axis(
     show_error_bars: bool,
     point_annotations: Optional[Dict[Tuple[str, str], str]] = None,
     subtitle_note: Optional[str] = None,
+    x_axis_label: str = "Echo",
 ) -> None:
     """Render one metric on a provided matplotlib axis.
     Args:
@@ -472,7 +661,7 @@ def _plot_metric_on_axis(
 
     axis.set_xticks(np.arange(len(x_labels_all), dtype=np.float64))
     axis.set_xticklabels(x_labels_all)
-    axis.set_xlabel("Echo")
+    axis.set_xlabel(x_axis_label)
     axis.set_ylabel(METRIC_YLABEL.get(metric, metric))
     ylabel = METRIC_YLABEL.get(metric, metric)
     if show_error_bars:
@@ -544,6 +733,45 @@ def _slice_panel_suptitle(
     return f"Slice-level spike summary across echoes ({scope}; {split})"
 
 
+def _panel_suptitle_qa_sessions(
+    subject: Optional[str],
+    session: Optional[str],
+    group_by_task: bool,
+    show_error_bars: bool = True,
+) -> str:
+    """Build core-panel title for phantom QA-session comparisons."""
+    _ = (subject, session, group_by_task)
+    if show_error_bars:
+        return "tSNR/fTSNR summary across QA sessions (with error bars)"
+    return "tSNR/fTSNR summary across QA sessions"
+
+
+def _spike_panel_suptitle_qa_sessions(
+    subject: Optional[str],
+    session: Optional[str],
+    group_by_task: bool,
+    show_error_bars: bool = True,
+) -> str:
+    """Build spike-panel title for phantom QA-session comparisons."""
+    _ = (subject, session, group_by_task)
+    if show_error_bars:
+        return "ROI mean TR spike metrics (robust z) across QA sessions (with error bars)"
+    return "ROI mean TR spike metrics (robust z) across QA sessions"
+
+
+def _slice_panel_suptitle_qa_sessions(
+    subject: Optional[str],
+    session: Optional[str],
+    group_by_task: bool,
+    show_error_bars: bool = True,
+) -> str:
+    """Build slice-panel title for phantom QA-session comparisons."""
+    _ = (subject, session, group_by_task)
+    if show_error_bars:
+        return "Slice-level spike summary across QA sessions (with error bars)"
+    return "Slice-level spike summary across QA sessions"
+
+
 def _slice_annotation_lookup(
     aggregated_rows: Sequence[Dict[str, object]],
     annotation_metric: str,
@@ -568,6 +796,8 @@ def plot_slice_metric_panel(
     subject: Optional[str],
     session: Optional[str],
     show_error_bars: bool,
+    x_axis_label: str = "Echo",
+    suptitle_fn: Callable[..., str] = _slice_panel_suptitle,
 ) -> None:
     """Render two-panel slice summary with Z-index annotations on points."""
     fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=False)
@@ -590,6 +820,7 @@ def plot_slice_metric_panel(
         show_error_bars=show_error_bars,
         point_annotations=top_ann,
         subtitle_note="Z=slice for worst % (robust z < -4)",
+        x_axis_label=x_axis_label,
     )
     _plot_metric_on_axis(
         axes[1],
@@ -600,9 +831,10 @@ def plot_slice_metric_panel(
         show_error_bars=show_error_bars,
         point_annotations=bottom_ann,
         subtitle_note="Z=slice for min robust z (y-axis)",
+        x_axis_label=x_axis_label,
     )
     fig.suptitle(
-        _slice_panel_suptitle(
+        suptitle_fn(
             subject=subject,
             session=session,
             group_by_task=group_by_task,
@@ -627,6 +859,7 @@ def plot_metric_panel(
     suptitle_fn: Callable[..., str],
     figsize: Tuple[float, float] = (11, 14),
     show_error_bars: bool = True,
+    x_axis_label: str = "Echo",
 ) -> None:
     """Render metrics as one PNG with stacked subplots.
     Args:
@@ -654,6 +887,7 @@ def plot_metric_panel(
             error_mode=error_mode,
             group_by_task=group_by_task,
             show_error_bars=show_error_bars,
+            x_axis_label=x_axis_label,
         )
     fig.suptitle(
         suptitle_fn(
@@ -935,7 +1169,7 @@ def plot_roi_mean_signal_tr_session_grid(
 
 
 def run_report(
-    bids_root: Path,
+    bids_root: Optional[Path],
     out_dir: Path,
     error_mode: str,
     group_by_task: bool,
@@ -944,10 +1178,12 @@ def run_report(
     robust_z_tr_panels: bool = False,
     roi_mean_signal_tr_panels: bool = False,
     show_error_bars: bool = True,
+    phantom_stats_dir: Optional[Path] = None,
+    label_by: str = "auto",
 ) -> List[Path]:
     """Generate PNG summary plots and CSV.
     Args:
-        bids_root (Path): BIDS root with derivatives.
+        bids_root (Optional[Path]): BIDS root with derivatives (BIDS mode).
         out_dir (Path): Output directory for plots and CSV.
         error_mode (str): Error bar mode.
         group_by_task (bool): Include task in grouping when True.
@@ -956,17 +1192,38 @@ def run_report(
         robust_z_tr_panels (bool): When True, write ``robust_z_vs_tr_{subject}_{session}.png`` (requires subject and session).
         roi_mean_signal_tr_panels (bool): When True, write ``roi_mean_signal_vs_tr_{subject}_{session}.png`` (raw ROI mean vs TR).
         show_error_bars (bool): When False, echo panels use lines without y error bars.
+        phantom_stats_dir (Optional[Path]): Directory with phantom ``*_tsnr_stats.json`` files (phantom mode).
+        label_by (str): Phantom label mode: ``auto``, ``metadata_date``, or ``filename_date``.
     Returns:
         List[Path]: Paths generated by this run.
     Raises:
         ValueError: If no valid stats rows are found.
     """
-    stats_files = discover_stats_files(bids_root)
-    rows = filter_rows(load_metric_rows(stats_files), subject=subject, session=session)
+    if phantom_stats_dir is not None:
+        stats_files = discover_phantom_stats_files(phantom_stats_dir)
+        rows = load_phantom_metric_rows(stats_files, label_by=label_by)
+        # Phantom mode compares QA sessions directly; ignore BIDS filters and task grouping.
+        subject = "phantom"
+        session = "qa-series"
+        group_by_task = False
+        x_axis_label = "QA session"
+        core_suptitle_fn = _panel_suptitle_qa_sessions
+        spike_suptitle_fn = _spike_panel_suptitle_qa_sessions
+        slice_suptitle_fn = _slice_panel_suptitle_qa_sessions
+    else:
+        if bids_root is None:
+            raise ValueError("bids_root is required when phantom_stats_dir is not provided")
+        stats_files = discover_stats_files(bids_root)
+        rows = filter_rows(load_metric_rows(stats_files), subject=subject, session=session)
+        x_axis_label = "Echo"
+        core_suptitle_fn = _panel_suptitle
+        spike_suptitle_fn = _spike_panel_suptitle
+        slice_suptitle_fn = _slice_panel_suptitle
     if not rows:
         raise ValueError(
             "No valid stats rows discovered under "
-            f"{bids_root} for filters subject={subject!r}, session={session!r}"
+            f"{phantom_stats_dir if phantom_stats_dir is not None else bids_root} "
+            f"for filters subject={subject!r}, session={session!r}"
         )
 
     generated: List[Path] = []
@@ -983,8 +1240,9 @@ def run_report(
         group_by_task=group_by_task,
         subject=subject,
         session=session,
-        suptitle_fn=_panel_suptitle,
+        suptitle_fn=core_suptitle_fn,
         show_error_bars=show_error_bars,
+        x_axis_label=x_axis_label,
     )
     generated.append(panel_path)
 
@@ -1005,9 +1263,10 @@ def run_report(
             group_by_task=group_by_task,
             subject=subject,
             session=session,
-            suptitle_fn=_spike_panel_suptitle,
+            suptitle_fn=spike_suptitle_fn,
             figsize=(11, 12),
             show_error_bars=show_error_bars,
+            x_axis_label=x_axis_label,
         )
         generated.append(spike_path)
         csv_metric_names.extend(SPIKE_METRICS)
@@ -1030,6 +1289,8 @@ def run_report(
             subject=subject,
             session=session,
             show_error_bars=show_error_bars,
+            x_axis_label=x_axis_label,
+            suptitle_fn=slice_suptitle_fn,
         )
         generated.append(slice_path)
         csv_metric_names.extend(SLICE_METRICS + SLICE_INDEX_METRICS)
@@ -1050,6 +1311,8 @@ def run_report(
     generated.append(csv_path)
 
     if robust_z_tr_panels:
+        if phantom_stats_dir is not None:
+            raise ValueError("--robust-z-tr-panels is available only in BIDS mode")
         if subject is None or session is None:
             raise ValueError("--robust-z-tr-panels requires --subject and --session")
         session_paths = discover_session_stats_files(bids_root, subject, session)
@@ -1059,6 +1322,8 @@ def run_report(
         if plot_robust_z_tr_session_grid(session_paths, rz_path, subject=subject, session=session):
             generated.append(rz_path)
     if roi_mean_signal_tr_panels:
+        if phantom_stats_dir is not None:
+            raise ValueError("--roi-mean-signal-tr-panels is available only in BIDS mode")
         if subject is None or session is None:
             raise ValueError("--roi-mean-signal-tr-panels requires --subject and --session")
         session_paths = discover_session_stats_files(bids_root, subject, session)
@@ -1079,8 +1344,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bids-root",
         type=Path,
-        required=True,
+        default=None,
         help="BIDS dataset root containing sub-*/ses-*/derivatives/tsnr stats JSON files.",
+    )
+    parser.add_argument(
+        "--phantom-stats-dir",
+        type=Path,
+        default=None,
+        help="Directory containing phantom *_tsnr_stats.json files (non-BIDS workflow).",
+    )
+    parser.add_argument(
+        "--label-by",
+        type=str,
+        default="auto",
+        choices=LABEL_BY_CHOICES,
+        help="In phantom mode, resolve session labels from metadata date, filename date, or auto.",
     )
     parser.add_argument(
         "--out-dir",
@@ -1152,9 +1430,19 @@ def cli(argv: Optional[List[str]] = None) -> int:
         int: Exit code.
     """
     args = build_parser().parse_args(argv)
+    bids_root = args.bids_root.expanduser() if args.bids_root is not None else None
+    phantom_stats_dir = (
+        args.phantom_stats_dir.expanduser() if args.phantom_stats_dir is not None else None
+    )
+    if (bids_root is None) == (phantom_stats_dir is None):
+        print("Error: provide exactly one of --bids-root or --phantom-stats-dir")
+        return 1
     if args.no_error_bars and args.show_error_bars:
         print("Error: use only one of --no-error-bars and --show-error-bars")
         return 1
+    out_dir = args.out_dir.expanduser()
+    if phantom_stats_dir is not None and args.out_dir == Path("reports") / "tsnr_plots":
+        out_dir = default_out_dir_for_phantom_stats_dir(phantom_stats_dir)
     has_sub_ses = args.subject is not None and args.session is not None
     if args.pool_across_tasks:
         group_by_task = False
@@ -1172,8 +1460,8 @@ def cli(argv: Optional[List[str]] = None) -> int:
         show_error_bars = True
     try:
         generated = run_report(
-            bids_root=args.bids_root.expanduser(),
-            out_dir=args.out_dir.expanduser(),
+            bids_root=bids_root,
+            out_dir=out_dir,
             error_mode=args.error_bar,
             group_by_task=group_by_task,
             subject=args.subject,
@@ -1181,6 +1469,8 @@ def cli(argv: Optional[List[str]] = None) -> int:
             robust_z_tr_panels=bool(args.robust_z_tr_panels),
             roi_mean_signal_tr_panels=bool(args.roi_mean_signal_tr_panels),
             show_error_bars=show_error_bars,
+            phantom_stats_dir=phantom_stats_dir,
+            label_by=str(args.label_by),
         )
     except ValueError as exc:
         print(f"Error: {exc}")

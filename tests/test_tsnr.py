@@ -697,7 +697,24 @@ def test_json_contract_fields_present(tmp_path: Path) -> None:
     assert stats["timepoint_selection"]["n_timepoints_used"] == 4
     assert stats["output_map_censoring"] == "roi_masked"
     assert "ftsnr" in stats and "roi_mean_signal_std" in stats
-    assert "slice_ftsnr_metrics" not in stats
+    assert "slice_ftsnr_metrics" in stats
+    assert stats["slice_ftsnr_metrics"]["axis"] == "z"
+
+
+def test_phantom_stats_include_qa_session_date_when_filename_has_date(tmp_path: Path) -> None:
+    """Filename date is normalized into ``qa_session_date`` for phantom QA plotting."""
+    data = make_phantom_data((13, 13, 3, 4))
+    input_path = tmp_path / "site_fMRIQASnap_2026_04_02__E123.npz"
+    vol = np.transpose(data, (2, 3, 0, 1))
+    np.savez(input_path, cache_version=2, volume=vol)
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        roi_size=13,
+        first_timepoint=0,
+    )
+    stats = load_stats(stats_path)
+    assert stats["qa_session_date"] == "2026-04-02"
 
 
 def test_brain_json_includes_brain_masking_contract_keys(tmp_path: Path) -> None:

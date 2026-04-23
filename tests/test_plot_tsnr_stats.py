@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from plot_tsnr_stats import (
+    default_out_dir_for_phantom_stats_dir,
+    discover_phantom_stats_files,
     _count_abs_robust_z_gt_3,
     cli as plot_cli,
     aggregate_metric_rows,
@@ -38,6 +40,7 @@ from plot_tsnr_stats import (
     plot_robust_z_tr_session_grid,
     roi_mean_signal_series_from_spike_block,
     run_report,
+    resolve_phantom_session_label,
     tr_plot_z_from_spike_block,
 )
 
@@ -392,3 +395,71 @@ def test_run_report_with_roi_mean_signal_tr_panels(tmp_path: Path) -> None:
     )
     assert out_dir / "roi_mean_signal_vs_tr_sub-01_ses-1a.png" in generated
     assert (out_dir / "roi_mean_signal_vs_tr_sub-01_ses-1a.png").exists()
+
+
+def test_resolve_phantom_session_label_prefers_metadata_date() -> None:
+    """Metadata date key wins over filename-derived date in auto mode."""
+    payload: Dict[str, object] = {
+        "qa_session_date": "2026-04-02",
+        "input_file": "/tmp/fMRIQASnap_2024_03_11__E1.npz",
+    }
+    label = resolve_phantom_session_label(
+        payload,
+        stats_path=Path("run_tsnr_stats.json"),
+        label_by="auto",
+    )
+    assert label == "2026-04-02"
+
+
+def test_discover_phantom_stats_and_default_out_dir(tmp_path: Path) -> None:
+    """Phantom discovery and dataset-local report defaults follow layout rules."""
+    stats_dir = tmp_path / "dataset" / "derivatives" / "tsnr"
+    stats_dir.mkdir(parents=True)
+    p1 = stats_dir / "a_tsnr_stats.json"
+    p1.write_text("{}", encoding="utf-8")
+    assert discover_phantom_stats_files(stats_dir) == [p1]
+    assert default_out_dir_for_phantom_stats_dir(stats_dir) == (
+        tmp_path / "dataset" / "reports" / "tsnr_plots"
+    )
+
+
+def test_run_report_phantom_mode_generates_outputs(tmp_path: Path) -> None:
+    """Phantom mode reads direct stats directory and writes QA-session panels."""
+    stats_dir = tmp_path / "dataset" / "derivatives" / "tsnr"
+    stats_dir.mkdir(parents=True)
+    _write_stats(
+        stats_dir / "AlbertaChildrensHospital_Basic_fMRIQASnap_2024_03_11__E52718S1_tsnr_stats.json",
+        80.0,
+        10.0,
+        120.0,
+        0.85,
+        max_abs_robust_z=2.1,
+        pct_tr_abs_robust_z_gt_3=0.5,
+        n_tr_abs_robust_z_gt_3=1.0,
+    )
+    _write_stats(
+        stats_dir / "AlbertaChildrensHospital_Basic_fMRIQASnap_2026_04_02__E53214S1_tsnr_stats.json",
+        70.0,
+        11.0,
+        110.0,
+        0.90,
+        max_abs_robust_z=2.2,
+        pct_tr_abs_robust_z_gt_3=1.0,
+        n_tr_abs_robust_z_gt_3=2.0,
+    )
+    out_dir = default_out_dir_for_phantom_stats_dir(stats_dir)
+    generated = run_report(
+        bids_root=None,
+        out_dir=out_dir,
+        error_mode="sem",
+        group_by_task=False,
+        phantom_stats_dir=stats_dir,
+        label_by="filename_date",
+    )
+    assert out_dir / "metrics_panel_by_echo_sem.png" in generated
+    assert out_dir / "spike_metrics_panel_by_echo_sem.png" in generated
+    assert out_dir / "slice_metrics_panel_by_echo_sem.png" in generated
+    assert out_dir / "aggregated_metric_summary.csv" in generated
+    csv_text = (out_dir / "aggregated_metric_summary.csv").read_text(encoding="utf-8")
+    assert "2024-03-11" in csv_text
+    assert "2026-04-02" in csv_text

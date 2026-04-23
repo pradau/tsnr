@@ -79,7 +79,7 @@ Useful options:
 - `--write-tmean-tstd`: also write temporal mean and standard deviation maps (`*_Tmean.nii.gz`, `*_Tstd.nii.gz`).
 - `--full-fov-maps`: do not NaN voxels outside the ROI in written maps.
 - `--input-pattern`: when `input` is a directory, override the default `*_bold.nii.gz` / `*_bold.nii` discovery with one glob.
-- `--slice-min-voxels-floor` / `--slice-min-voxels-ratio`: tune z-slice eligibility for `slice_ftsnr_metrics` (brain mode defaults: floor **50**, ratio **0.40**).
+- `--slice-min-voxels-floor` / `--slice-min-voxels-ratio`: tune z-slice eligibility for `slice_ftsnr_metrics` (defaults: floor **50**, ratio **0.40**).
 
 ## Inputs
 
@@ -113,7 +113,7 @@ Basename rules:
   - `tsnr_std` is the spatial standard deviation of per-voxel tSNR across the ROI.
   - `roi_mean_signal_std` is the temporal standard deviation of the ROI-mean fMRI signal across frames (signal units, suitable for longitudinal plot error bars). `ftsnr` is the mean of that ROI-mean series divided by `roi_mean_signal_std`.
   - `roi_mean_tr_spike_metrics`: see **ROI mean TR spike metrics** below.
-  - `slice_ftsnr_metrics` (brain mode): per-z-slice negative-spike summary for localized dropout detection; see **Slice-level metrics** below.
+  - `slice_ftsnr_metrics`: per-z-slice negative-spike summary for localized dropout detection; see **Slice-level metrics** below.
 - `map_affine_source`, `output_map_censoring`
 - Mode-specific `parameters` (see below)
 
@@ -133,7 +133,7 @@ Typical JSON keys (see your stats file for the exact set): `n_timepoints`, `meth
 
 High counts or large `max_abs_*` values point to TRs with unusually high or low whole-ROI signal relative to the rest of the run (for example motion spikes, acquisition glitches, or extreme signal dropouts).
 
-#### Slice-level metrics (`slice_ftsnr_metrics`, brain mode)
+#### Slice-level metrics (`slice_ftsnr_metrics`)
 
 This block flags slices with **large negative** robust-z events on the **slice ROI-mean time course** (same voxels and **same `timepoint_selection`** as the rest of the run). Whole-brain `ftsnr` can miss slice-local dropout.
 
@@ -231,9 +231,30 @@ Run from the project root:
 uv run plot_tsnr_stats.py --bids-root /path/to/bids
 ```
 
+For phantom QA datasets that are **not** in BIDS, point the plotter directly at the stats folder:
+
+```bash
+uv run plot_tsnr_stats.py --phantom-stats-dir /path/to/dataset/derivatives/tsnr
+```
+
+In phantom mode, the x-axis uses QA session labels (date-style labels) instead of BIDS `echo-*`. Session labels are resolved as:
+
+1. metadata date fields in the stats JSON (for example `qa_session_date`) when present
+2. date parsed from filename/input basename (for example `...fMRIQASnap_2026_04_02...` -> `2026-04-02`)
+3. fallback to basename with a warning if no date can be extracted
+
+You can force label strategy with `--label-by {auto,metadata_date,filename_date}` (default: `auto`).
+
+Default output path in phantom mode is dataset-local:
+
+- input `.../derivatives/tsnr` -> output `.../reports/tsnr_plots`
+- override with `--out-dir` when needed
+
 Useful options:
 
 - `--out-dir`: output directory for plots and CSV (default: `reports/tsnr_plots`)
+- `--phantom-stats-dir`: non-BIDS phantom stats input directory (`*_tsnr_stats.json`), compared across QA sessions
+- `--label-by {auto,metadata_date,filename_date}`: phantom QA session label source
 - `--error-bar {sd,sem,ci95}`: spread used for CSV `error` column and for panel y error bars when error bars are shown (default: `sem`)
 - `--subject sub-XXXX` and `--session ses-X`: optional filters
 - **When both `--subject` and `--session` are set** (typical single-session QA): **one line per task** by default (no pooling across tasks), and **echo panels omit error bars** by default so you see separate curves without SEM/SD caps. The CSV still lists `mean` and `error` per group.

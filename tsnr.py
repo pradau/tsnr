@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import date, datetime, time, timezone
@@ -412,6 +413,19 @@ def derive_basename(input_path: Path) -> str:
     if name.endswith(".nii.gz"):
         return name[: -len(".nii.gz")]
     return input_path.stem
+
+
+def derive_qa_session_date(input_path: Path) -> Optional[str]:
+    """Extract ``YYYY-MM-DD`` from an input basename for longitudinal phantom QA.
+    Args:
+        input_path (Path): Input NIfTI/NPZ path.
+    Returns:
+        Optional[str]: Normalized date string, or ``None`` when not present.
+    """
+    match = re.search(r"(20\d{2})[_-](\d{2})[_-](\d{2})", input_path.name)
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
 def default_output_dir_for_input(input_path: Path) -> Path:
@@ -1182,14 +1196,12 @@ def save_outputs(
         brain_mask_override,
     )
     ft_metrics = compute_ftsnr_metrics(data_4d, analysis_roi_mask)
-    slice_ft_metrics: Optional[Dict[str, Any]] = None
-    if mode == "brain":
-        slice_ft_metrics = compute_slice_ftsnr_metrics(
-            data_4d,
-            analysis_roi_mask,
-            min_voxels_floor=slice_min_voxels_floor,
-            min_voxels_ratio=slice_min_voxels_ratio,
-        )
+    slice_ft_metrics: Optional[Dict[str, Any]] = compute_slice_ftsnr_metrics(
+        data_4d,
+        analysis_roi_mask,
+        min_voxels_floor=slice_min_voxels_floor,
+        min_voxels_ratio=slice_min_voxels_ratio,
+    )
 
     output_map_censoring = "full_fov"
     tsnr_save = tsnr_map
@@ -1252,6 +1264,9 @@ def save_outputs(
         "timepoint_selection": timepoint_selection,
         "parameters": parameters,
     }
+    qa_session_date = derive_qa_session_date(input_path)
+    if qa_session_date is not None:
+        payload["qa_session_date"] = qa_session_date
     if slice_ft_metrics is not None:
         payload["slice_ftsnr_metrics"] = slice_ft_metrics
     stats_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
