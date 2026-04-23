@@ -13,7 +13,11 @@ wheels/
 # Local legacy reference implementation and data
 simple-tSNR/
 
-# Local NIfTI inputs and script outputs (not versioned)
+# Brain regression datasets and recomputed outputs (local-only; contains large clinical-like EPI).
+# Do NOT delete this rule to "add brain_regression to GitHub" unless policy explicitly allows public release.
+brain_regression/
+
+# Generic local scratch (legacy); prefer phantom_regression/ for versioned phantom QA fixtures.
 data/
 output/
 

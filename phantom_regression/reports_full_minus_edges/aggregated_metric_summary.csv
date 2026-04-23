@@ -1,0 +1,15 @@
+metric,sub,ses,echo,task,n_runs,mean,error
+ftsnr,phantom,qa-series,2024-03-11,pooled,1,2753.825748405616,0.0
+ftsnr,phantom,qa-series,2026-04-02,pooled,1,152.247753725461,0.0
+roi_mean_signal_std,phantom,qa-series,2024-03-11,pooled,1,0.7695642362644931,0.0
+roi_mean_signal_std,phantom,qa-series,2026-04-02,pooled,1,15.118431331501663,0.0
+tsnr_mean,phantom,qa-series,2024-03-11,pooled,1,198.04921965592524,0.0
+tsnr_mean,phantom,qa-series,2026-04-02,pooled,1,54.376473159583654,0.0
+worst_slice_spike_max_abs_robust_z,phantom,qa-series,2024-03-11,pooled,1,3.6373853530043583,0.0
+worst_slice_spike_max_abs_robust_z,phantom,qa-series,2026-04-02,pooled,1,206.6468781960021,0.0
+worst_slice_spike_max_abs_slice_index,phantom,qa-series,2024-03-11,pooled,1,16.0,0.0
+worst_slice_spike_max_abs_slice_index,phantom,qa-series,2026-04-02,pooled,1,17.0,0.0
+worst_slice_spike_pct_slice_index,phantom,qa-series,2024-03-11,pooled,1,16.0,0.0
+worst_slice_spike_pct_slice_index,phantom,qa-series,2026-04-02,pooled,1,12.0,0.0
+worst_slice_spike_pct_tr_abs_robust_z_gt_4,phantom,qa-series,2024-03-11,pooled,1,0.0,0.0
+worst_slice_spike_pct_tr_abs_robust_z_gt_4,phantom,qa-series,2026-04-02,pooled,1,14.646464646464647,0.0

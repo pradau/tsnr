@@ -28,7 +28,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import binary_erosion, center_of_mass
+from scipy.ndimage import binary_erosion, center_of_mass, label
+
+# Absolute robust-z cutoff for TR spike counts (ROI and per-slice ROI-mean series).
+ROBUST_Z_SPIKE_ABS_THRESHOLD: float = 4.0
 
 
 def fsl_dir() -> Path:
@@ -276,7 +279,7 @@ def _brain_masking_fallback_no_t1() -> Dict[str, Any]:
     Build ``brain_masking`` JSON when no T1 is found under ``anat/``.
     """
     return {
-        "method": "mean_intensity",
+        "method": "centroid_seeded",
         "t1_path": None,
         "t1_to_functional_pipeline": "not_attempted_no_t1",
         "detail": (
@@ -292,7 +295,7 @@ def _brain_masking_fallback_pipeline_failed(t1_path: Optional[Path], exc: BaseEx
     Build ``brain_masking`` JSON when BET or registration fails.
     """
     return {
-        "method": "mean_intensity",
+        "method": "centroid_seeded",
         "t1_path": str(t1_path.resolve()) if t1_path is not None else None,
         "t1_to_functional_pipeline": "failed",
         "detail": _format_brain_pipeline_error(exc),
@@ -304,7 +307,7 @@ def _brain_masking_fallback_no_nifti_header() -> Dict[str, Any]:
     Build ``brain_masking`` JSON for defensive brain path without spatial NIfTI.
     """
     return {
-        "method": "mean_intensity",
+        "method": "centroid_seeded",
         "t1_path": None,
         "t1_to_functional_pipeline": "not_attempted_no_nifti",
         "detail": "Spatial NIfTI header is required for brain masking.",
@@ -498,12 +501,22 @@ def apply_timepoint_selection(
     return sliced, meta
 
 
-def validate_common_args(mode: str, threshold: float, erosion_voxels: int) -> None:
+def validate_common_args(
+    mode: str,
+    threshold: float,
+    erosion_voxels: int,
+    phantom_roi_mode: str,
+    phantom_edge_erosion_voxels: int,
+    phantom_full_threshold_fraction: float,
+) -> None:
     """Validate common CLI arguments.
     Args:
         mode (str): Analysis mode.
         threshold (float): Brain threshold fraction.
         erosion_voxels (int): Brain erosion iterations.
+        phantom_roi_mode (str): Phantom ROI mode.
+        phantom_edge_erosion_voxels (int): Phantom edge-erosion iterations.
+        phantom_full_threshold_fraction (float): Phantom full-mask threshold fraction.
     Raises:
         ValueError: If any value is invalid.
     """
@@ -513,6 +526,14 @@ def validate_common_args(mode: str, threshold: float, erosion_voxels: int) -> No
         raise ValueError("--threshold must be strictly between 0 and 1")
     if erosion_voxels < 0:
         raise ValueError("--erosion-voxels must be >= 0")
+    if phantom_roi_mode not in ("patch", "full_minus_edges"):
+        raise ValueError("--phantom-roi-mode must be one of: patch, full_minus_edges")
+    if phantom_edge_erosion_voxels < 0:
+        raise ValueError("--phantom-edge-erosion-voxels must be >= 0")
+    if not (0.0 < phantom_full_threshold_fraction < 1.0):
+        raise ValueError(
+            "--phantom-full-threshold-fraction must be strictly between 0 and 1"
+        )
 
 
 def load_nifti_4d(input_path: Path) -> Tuple[np.ndarray, nib.Nifti1Image]:
@@ -584,6 +605,9 @@ def run_phantom_analysis_from_4d(
     *,
     roi_size: int = 15,
     slice_index: Optional[int] = None,
+    phantom_roi_mode: str = "patch",
+    phantom_edge_erosion_voxels: int = 1,
+    phantom_full_threshold_fraction: float = 0.35,
     first_timepoint: int = 2,
     last_timepoint: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -596,6 +620,11 @@ def run_phantom_analysis_from_4d(
         data_4d (np.ndarray): Full ``(x, y, z, t)`` volume before timepoint selection.
         roi_size (int): Odd positive phantom ROI edge length in pixels.
         slice_index (Optional[int]): Z slice index, or ``None`` for middle slice.
+        phantom_roi_mode (str): ``patch`` or ``full_minus_edges``.
+        phantom_edge_erosion_voxels (int): 2D per-slice erosion iterations for
+            ``full_minus_edges``.
+        phantom_full_threshold_fraction (float): Intensity threshold as a fraction
+            of local reference for ``full_minus_edges``.
         first_timepoint (int): 0-based first time index to include (default ``2`` drops first two volumes).
         last_timepoint (Optional[int]): 0-based last time index inclusive, or ``None`` for end.
 
@@ -621,8 +650,16 @@ def run_phantom_analysis_from_4d(
         last_index_inclusive=last_timepoint,
     )
     mean_volume, std_volume, tsnr_map = compute_tsnr_map(data_4d)
-    selected_values, parameters = extract_phantom_tsnr(tsnr_map, mean_volume, roi_size, slice_index)
-    roi_mask = build_phantom_roi_mask(data_4d.shape[:3], parameters)
+    selected_values, parameters = extract_phantom_tsnr(
+        tsnr_map,
+        mean_volume,
+        roi_size,
+        slice_index,
+        phantom_roi_mode=phantom_roi_mode,
+        phantom_edge_erosion_voxels=phantom_edge_erosion_voxels,
+        phantom_full_threshold_fraction=phantom_full_threshold_fraction,
+    )
+    roi_mask = build_phantom_analysis_mask(data_4d.shape[:3], mean_volume, parameters)
     summary = {**summarize(selected_values), **compute_ftsnr_metrics(data_4d, roi_mask)}
     return {
         "data_4d": data_4d,
@@ -692,18 +729,50 @@ def extract_phantom_tsnr(
     mean_volume: np.ndarray,
     roi_size: int,
     slice_index: Optional[int],
+    phantom_roi_mode: str = "patch",
+    phantom_edge_erosion_voxels: int = 1,
+    phantom_full_threshold_fraction: float = 0.35,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Extract phantom ROI values from selected slice.
     Args:
         tsnr_map (np.ndarray): 3D tSNR map.
         mean_volume (np.ndarray): 3D mean volume.
-        roi_size (int): ROI side length.
+        roi_size (int): ROI side length for ``patch`` mode.
         slice_index (Optional[int]): Selected slice or None for middle.
+        phantom_roi_mode (str): ``patch`` or ``full_minus_edges``.
+        phantom_edge_erosion_voxels (int): 2D per-slice erosion iterations used
+            only by ``full_minus_edges``.
+        phantom_full_threshold_fraction (float): Intensity threshold fraction for
+            ``full_minus_edges`` (vs local reference).
     Returns:
         Tuple[np.ndarray, Dict[str, Any]]: ROI values and parameter metadata.
     Raises:
         ValueError: If slice index or ROI extraction is invalid.
     """
+    if phantom_roi_mode == "full_minus_edges":
+        threshold_fraction = float(phantom_full_threshold_fraction)
+        mask = build_phantom_full_mask(
+            mean_volume,
+            phantom_edge_erosion_voxels,
+            threshold_fraction=threshold_fraction,
+        )
+        values = tsnr_map[mask]
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            raise ValueError("phantom full-minus-edges ROI contains zero valid voxels")
+        params = {
+            "phantom_roi_mode": "full_minus_edges",
+            "full_phantom_mask": {
+                "source": "centroid_seeded_region_grow_3d_above_fraction_of_local_centroid_percentile",
+                "reference_radius_voxels": 15,
+                "reference_percentile": 90.0,
+                "threshold_fraction": float(threshold_fraction),
+                "edge_erosion_voxels": int(phantom_edge_erosion_voxels),
+                "erosion_axis": "xy_per_slice",
+            },
+        }
+        return finite_values, params
+
     z_dim = tsnr_map.shape[2]
     target_slice = z_dim // 2 if slice_index is None else slice_index
     if not (0 <= target_slice < z_dim):
@@ -715,6 +784,7 @@ def extract_phantom_tsnr(
     if finite_values.size == 0:
         raise ValueError("phantom ROI contains zero valid voxels")
     params = {
+        "phantom_roi_mode": "patch",
         "roi_size": roi_size,
         "slice_index": int(target_slice),
         "roi_bounds": [int(row_start), int(row_end), int(col_start), int(col_end)],
@@ -730,21 +800,128 @@ def build_brain_mask(
     """Build the same boolean brain mask used for ROI statistics.
     Args:
         mean_volume (np.ndarray): 3D temporal mean volume.
-        threshold (float): Relative threshold fraction (vs positive-voxel baseline).
+        threshold (float): Relative threshold fraction of local reference intensity.
         erosion_voxels (int): Binary erosion iterations.
     Returns:
         np.ndarray: Boolean array shaped like ``mean_volume``.
     Raises:
         ValueError: If there are no positive voxels to define a baseline.
     """
-    positive = mean_volume > 0.0
-    if not np.any(positive):
-        raise ValueError("brain mask baseline could not be computed: no positive voxels")
-    baseline = float(np.mean(mean_volume[positive]))
-    mask = mean_volume >= (threshold * baseline)
+    seed_xyz, reference_intensity = local_centroid_percentile_reference(
+        mean_volume,
+        radius_voxels=15,
+        percentile=90.0,
+        label_prefix="brain",
+    )
+    mask = _mask_from_centroid_seeded_threshold(
+        mean_volume,
+        float(threshold) * float(reference_intensity),
+        seed_xyz,
+        label_prefix="brain",
+    )
     if erosion_voxels > 0:
         mask = binary_erosion(mask, iterations=erosion_voxels)
+    if np.any(mask):
+        mask = largest_connected_component(mask, label_prefix="brain")
     return mask
+
+
+def _mask_from_centroid_seeded_threshold(
+    mean_volume: np.ndarray,
+    threshold_value: float,
+    seed_xyz: Tuple[int, int, int],
+    label_prefix: str,
+) -> np.ndarray:
+    """Keep the 3D connected component that contains the seed after thresholding.
+    Args:
+        mean_volume (np.ndarray): 3D temporal mean volume.
+        threshold_value (float): Absolute intensity cutoff.
+        seed_xyz (Tuple[int, int, int]): Voxel to seed the component (from centroid
+            or relocated if needed).
+        label_prefix (str): Prefix for error messages.
+    Returns:
+        np.ndarray: Boolean mask for one 6-connected component.
+    Raises:
+        ValueError: If thresholding or component selection fails.
+    """
+    candidate = mean_volume >= float(threshold_value)
+    if not np.any(candidate):
+        raise ValueError(f"{label_prefix} mask is empty after thresholding")
+    seed = seed_xyz
+    if not bool(candidate[seed]):
+        flat_idx = int(np.argmax(mean_volume * candidate))
+        seed = tuple(int(x) for x in np.unravel_index(flat_idx, mean_volume.shape))
+    labeled, n_labels = label(candidate)
+    if n_labels < 1:
+        raise ValueError(f"{label_prefix} region-growing failed to find connected components")
+    seed_label = int(labeled[seed])
+    if seed_label <= 0:
+        raise ValueError(f"{label_prefix} seed is not inside thresholded candidate mask")
+    return labeled == seed_label
+
+
+def local_centroid_percentile_reference(
+    mean_volume: np.ndarray,
+    radius_voxels: int,
+    percentile: float,
+    label_prefix: str,
+) -> Tuple[Tuple[int, int, int], float]:
+    """Robust local reference intensity from a centroid neighborhood.
+    Args:
+        mean_volume (np.ndarray): 3D temporal mean volume.
+        radius_voxels (int): Radius of 3D neighborhood around centroid.
+        percentile (float): Percentile of local positive finite samples.
+        label_prefix (str): Prefix for error messages.
+    Returns:
+        Tuple[Tuple[int, int, int], float]: Seed voxel and reference intensity.
+    Raises:
+        ValueError: If no positive signal or no valid local samples exist.
+    """
+    positive = mean_volume > 0.0
+    if not np.any(positive):
+        raise ValueError(f"{label_prefix} mask baseline could not be computed: no positive voxels")
+    com = center_of_mass(np.maximum(mean_volume, 0.0))
+    seed_xyz = tuple(
+        int(np.clip(round(float(c)), 0, mean_volume.shape[i] - 1))
+        for i, c in enumerate(com)
+    )
+    if radius_voxels < 1:
+        radius_voxels = 1
+    gx, gy, gz = np.ogrid[: mean_volume.shape[0], : mean_volume.shape[1], : mean_volume.shape[2]]
+    dist2 = (gx - seed_xyz[0]) ** 2 + (gy - seed_xyz[1]) ** 2 + (gz - seed_xyz[2]) ** 2
+    local = dist2 <= int(radius_voxels) ** 2
+    valid = local & np.isfinite(mean_volume) & (mean_volume > 0.0)
+    samples = mean_volume[valid]
+    if samples.size < 1:
+        raise ValueError(f"{label_prefix} local centroid neighborhood has no valid positive voxels")
+    ref = float(np.percentile(samples, float(percentile)))
+    if not np.isfinite(ref) or ref <= 0.0:
+        raise ValueError(f"{label_prefix} local centroid reference intensity is invalid")
+    return seed_xyz, ref
+
+
+def largest_connected_component(mask: np.ndarray, label_prefix: str) -> np.ndarray:
+    """Keep only the largest connected component in a boolean mask.
+    Args:
+        mask (np.ndarray): Candidate boolean mask.
+        label_prefix (str): Prefix for error messages.
+    Returns:
+        np.ndarray: Boolean mask containing only the largest component.
+    Raises:
+        ValueError: If the mask is empty or no component can be selected.
+    """
+    mask_bool = np.asarray(mask, dtype=bool)
+    if not np.any(mask_bool):
+        raise ValueError(f"{label_prefix} mask is empty before connected-component cleanup")
+    labeled, n_labels = label(mask_bool)
+    if n_labels < 1:
+        raise ValueError(f"{label_prefix} connected-component cleanup found no components")
+    component_sizes = np.bincount(labeled.ravel())
+    component_sizes[0] = 0
+    keep_label = int(np.argmax(component_sizes))
+    if keep_label <= 0:
+        raise ValueError(f"{label_prefix} connected-component cleanup failed to select a component")
+    return labeled == keep_label
 
 
 def build_phantom_roi_mask(volume_shape: Tuple[int, int, int], params: Dict[str, Any]) -> np.ndarray:
@@ -763,6 +940,76 @@ def build_phantom_roi_mask(volume_shape: Tuple[int, int, int], params: Dict[str,
     return mask
 
 
+def build_phantom_full_mask(
+    mean_volume: np.ndarray,
+    edge_erosion_voxels: int,
+    threshold_fraction: float = 0.35,
+) -> np.ndarray:
+    """Build a 3D phantom mask from centroid-seeded region growing and 2D erosion.
+    Args:
+        mean_volume (np.ndarray): 3D temporal mean volume.
+        edge_erosion_voxels (int): In-plane erosion iterations for each z slice.
+        threshold_fraction (float): Threshold fraction of local reference intensity.
+    Returns:
+        np.ndarray: Boolean mask shaped like ``mean_volume`` with a single 6-connected
+        cluster.
+    Raises:
+        ValueError: If centroid seed, grown mask, or eroded mask is empty.
+    """
+    seed_xyz, reference_intensity = local_centroid_percentile_reference(
+        mean_volume,
+        radius_voxels=15,
+        percentile=90.0,
+        label_prefix="phantom",
+    )
+    threshold_value = float(threshold_fraction) * float(reference_intensity)
+    base_mask = _mask_from_centroid_seeded_threshold(
+        mean_volume,
+        threshold_value,
+        seed_xyz,
+        label_prefix="phantom",
+    )
+    final: np.ndarray
+    if edge_erosion_voxels <= 0:
+        final = base_mask
+    else:
+        eroded = np.zeros_like(base_mask, dtype=bool)
+        for z in range(base_mask.shape[2]):
+            slice_mask = base_mask[:, :, z]
+            if np.any(slice_mask):
+                eroded[:, :, z] = binary_erosion(slice_mask, iterations=edge_erosion_voxels)
+        if not np.any(eroded):
+            raise ValueError("phantom mask is empty after edge erosion")
+        final = eroded
+    return largest_connected_component(final, label_prefix="phantom")
+
+
+def build_phantom_analysis_mask(
+    volume_shape: Tuple[int, int, int],
+    mean_volume: np.ndarray,
+    parameters: Dict[str, Any],
+) -> np.ndarray:
+    """Build the phantom ROI mask for summary and map censoring.
+    Args:
+        volume_shape (Tuple[int, int, int]): Spatial shape of 3D maps.
+        mean_volume (np.ndarray): 3D temporal mean volume.
+        parameters (Dict[str, Any]): Phantom parameters block from stats.
+    Returns:
+        np.ndarray: Boolean mask shaped ``volume_shape``.
+    """
+    roi_mode = str(parameters.get("phantom_roi_mode", "patch"))
+    if roi_mode == "full_minus_edges":
+        mask_meta = parameters.get("full_phantom_mask", {})
+        edge_erosion_voxels = int(mask_meta.get("edge_erosion_voxels", 1))
+        threshold_fraction = float(mask_meta.get("threshold_fraction", 0.35))
+        return build_phantom_full_mask(
+            mean_volume,
+            edge_erosion_voxels,
+            threshold_fraction=threshold_fraction,
+        )
+    return build_phantom_roi_mask(volume_shape, parameters)
+
+
 def extract_brain_tsnr(
     tsnr_map: np.ndarray,
     mean_volume: np.ndarray,
@@ -773,11 +1020,12 @@ def extract_brain_tsnr(
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Extract brain-mask tSNR values.
     In ``brain`` mode, when ``brain_mask`` is ``None``, the mask is built from the
-    temporal mean (threshold times positive-voxel baseline, then erosion). When
+    temporal mean using centroid-seeded thresholding with a local percentile
+    reference, then erosion and largest-component cleanup. When
     ``brain_mask`` is set (for example from T1 BET + registration), that array is
     used instead.
-    JSON metadata: ``intensity_brain_mask`` (threshold and erosion) is written only
-    when the spatial mask was built from intensity rules. It is omitted when a
+    JSON metadata: ``intensity_brain_mask`` (method, threshold, and erosion) is
+    written only when the spatial mask was built from fallback rules. It is omitted when a
     supplied mask array defined the ROI (for example T1-based BET), so stats do not
     list unused CLI values as if they had driven masking.
     Args:
@@ -786,7 +1034,7 @@ def extract_brain_tsnr(
         threshold (float): Relative threshold fraction.
         erosion_voxels (int): Binary erosion iterations.
         brain_mask (Optional[np.ndarray]): If provided, boolean mask shaped like
-            ``mean_volume``; otherwise intensity thresholding + erosion is used.
+            ``mean_volume``; otherwise centroid-seeded thresholding + erosion is used.
         brain_masking_report (Optional[Dict[str, Any]]): Optional ``brain_masking``
             object merged into ``parameters`` (method, T1 path, pipeline status).
     Returns:
@@ -812,6 +1060,9 @@ def extract_brain_tsnr(
     }
     if brain_mask is None:
         params["intensity_brain_mask"] = {
+            "method": "centroid_seeded",
+            "reference_radius_voxels": 15,
+            "reference_percentile": 90.0,
             "threshold": float(threshold),
             "erosion_voxels": int(erosion_voxels),
         }
@@ -839,7 +1090,8 @@ def summarize(values: np.ndarray) -> Dict[str, float]:
 def compute_roi_tr_spike_metrics(roi_mean_series: np.ndarray) -> Dict[str, Any]:
     """TR-level outlier metrics on the ROI-mean time course (after timepoint selection).
 
-    Uses robust z (median and MAD scaled by 1.4826) to flag volumes with |z| > 3.
+    Uses robust z (median and MAD scaled by 1.4826) to flag volumes with
+    ``|z| > ROBUST_Z_SPIKE_ABS_THRESHOLD`` (4).
     Helps detect corrupted TRs with very high or very low signal relative to the run.
 
     Args:
@@ -862,8 +1114,8 @@ def compute_roi_tr_spike_metrics(roi_mean_series: np.ndarray) -> Dict[str, Any]:
                 "robust_median": 0.0,
                 "mad": 0.0,
                 "robust_sigma": 0.0,
-                "n_tr_abs_robust_z_gt_3": 0,
-                "pct_tr_abs_robust_z_gt_3": 0.0,
+                "n_tr_abs_robust_z_gt_4": 0,
+                "pct_tr_abs_robust_z_gt_4": 0.0,
                 "max_abs_robust_z": 0.0,
                 "robust_z_per_tr": [],
                 "roi_mean_signal_per_tr": [],
@@ -876,8 +1128,8 @@ def compute_roi_tr_spike_metrics(roi_mean_series: np.ndarray) -> Dict[str, Any]:
                 "robust_median": float(series[0]),
                 "mad": 0.0,
                 "robust_sigma": 0.0,
-                "n_tr_abs_robust_z_gt_3": 0,
-                "pct_tr_abs_robust_z_gt_3": 0.0,
+                "n_tr_abs_robust_z_gt_4": 0,
+                "pct_tr_abs_robust_z_gt_4": 0.0,
                 "max_abs_robust_z": 0.0,
                 "robust_z_per_tr": [0.0],
                 "roi_mean_signal_per_tr": [float(series[0])],
@@ -897,15 +1149,16 @@ def compute_roi_tr_spike_metrics(roi_mean_series: np.ndarray) -> Dict[str, Any]:
     else:
         signed_z = (series - median) / rs
         abs_robust_z = np.abs(signed_z)
-    n_rob = int(np.sum(abs_robust_z > 3.0))
+    z_cut = float(ROBUST_Z_SPIKE_ABS_THRESHOLD)
+    n_rob = int(np.sum(abs_robust_z > z_cut))
 
     out.update(
         {
             "robust_median": median,
             "mad": mad,
             "robust_sigma": rs,
-            "n_tr_abs_robust_z_gt_3": n_rob,
-            "pct_tr_abs_robust_z_gt_3": 100.0 * float(n_rob) / float(n_t),
+            "n_tr_abs_robust_z_gt_4": n_rob,
+            "pct_tr_abs_robust_z_gt_4": 100.0 * float(n_rob) / float(n_t),
             "max_abs_robust_z": float(np.max(abs_robust_z)),
             "robust_z_per_tr": [float(x) for x in signed_z],
             "roi_mean_signal_per_tr": [float(x) for x in series],
@@ -991,7 +1244,8 @@ def compute_slice_ftsnr_metrics(
         min_voxels_floor (int): Eligibility floor for ROI voxels per z-slice.
         min_voxels_ratio (float): Eligibility ratio versus the max-supported slice.
     Returns:
-        Dict[str, Any]: Slice-level negative-spike metrics and per-slice details.
+        Dict[str, Any]: Per-slice |robust z| spike summaries aligned with TR-level
+        ``roi_mean_tr_spike_metrics`` (same ``|z|>4`` rule), plus per-slice details.
     """
     z_dim = int(data_4d.shape[2])
     slice_voxel_counts: List[int] = [int(np.count_nonzero(roi_mask[:, :, z])) for z in range(z_dim)]
@@ -1001,8 +1255,7 @@ def compute_slice_ftsnr_metrics(
         min_voxels_floor=min_voxels_floor,
         min_voxels_ratio=min_voxels_ratio,
     )
-    # Stricter than TR-level outlier default: % ranking uses z < -4 only.
-    slice_neg_count_z: float = 4.0
+    z_cut = float(ROBUST_Z_SPIKE_ABS_THRESHOLD)
 
     per_slice: List[Dict[str, Any]] = []
     eligible_rows: List[Dict[str, Any]] = []
@@ -1015,23 +1268,19 @@ def compute_slice_ftsnr_metrics(
             "n_voxels": n_vox,
             "eligible": bool(eligible),
             "slice_roi_mean_tr_spike_metrics": empty_spike,
-            "slice_n_robust_z_lt_minus4": 0,
-            "slice_pct_robust_z_lt_minus4": 0.0,
-            "slice_min_robust_z": 0.0,
+            "slice_n_tr_abs_robust_z_gt_4": 0,
+            "slice_pct_tr_abs_robust_z_gt_4": 0.0,
+            "slice_max_abs_robust_z": 0.0,
         }
         if n_vox > 0:
             slice_mask = roi_mask[:, :, z]
             roi_ts = data_4d[:, :, z, :][slice_mask]
             roi_mean_series = np.mean(roi_ts, axis=0)
             spike_block = compute_roi_tr_spike_metrics(roi_mean_series)
-            robust_z = np.asarray(spike_block.get("robust_z_per_tr", []), dtype=np.float64)
-            n_neg = int(np.sum(robust_z < -slice_neg_count_z)) if robust_z.size > 0 else 0
-            pct_neg = (100.0 * float(n_neg) / float(robust_z.size)) if robust_z.size > 0 else 0.0
-            min_neg = float(np.min(robust_z)) if robust_z.size > 0 else 0.0
             row["slice_roi_mean_tr_spike_metrics"] = spike_block
-            row["slice_n_robust_z_lt_minus4"] = n_neg
-            row["slice_pct_robust_z_lt_minus4"] = pct_neg
-            row["slice_min_robust_z"] = min_neg
+            row["slice_n_tr_abs_robust_z_gt_4"] = int(spike_block.get("n_tr_abs_robust_z_gt_4", 0))
+            row["slice_pct_tr_abs_robust_z_gt_4"] = float(spike_block.get("pct_tr_abs_robust_z_gt_4", 0.0))
+            row["slice_max_abs_robust_z"] = float(spike_block.get("max_abs_robust_z", 0.0))
         per_slice.append(row)
         if eligible:
             eligible_rows.append(row)
@@ -1039,18 +1288,21 @@ def compute_slice_ftsnr_metrics(
     if eligible_rows:
         worst_pct_row = max(
             eligible_rows,
-            key=lambda r: (float(r["slice_pct_robust_z_lt_minus4"]), -float(r["slice_min_robust_z"])),
+            key=lambda r: (
+                float(r["slice_pct_tr_abs_robust_z_gt_4"]),
+                float(r["slice_max_abs_robust_z"]),
+            ),
         )
-        worst_max_row = min(eligible_rows, key=lambda r: float(r["slice_min_robust_z"]))
+        worst_max_row = max(eligible_rows, key=lambda r: float(r["slice_max_abs_robust_z"]))
         worst_slice_spike_pct_slice_index = int(worst_pct_row["slice_index"])
-        worst_slice_spike_min_slice_index = int(worst_max_row["slice_index"])
-        worst_slice_spike_pct_robust_z_lt_minus4 = float(worst_pct_row["slice_pct_robust_z_lt_minus4"])
-        worst_slice_spike_min_robust_z = float(worst_max_row["slice_min_robust_z"])
+        worst_slice_spike_max_abs_slice_index = int(worst_max_row["slice_index"])
+        worst_slice_spike_pct_tr_abs_robust_z_gt_4 = float(worst_pct_row["slice_pct_tr_abs_robust_z_gt_4"])
+        worst_slice_spike_max_abs_robust_z = float(worst_max_row["slice_max_abs_robust_z"])
     else:
         worst_slice_spike_pct_slice_index = -1
-        worst_slice_spike_min_slice_index = -1
-        worst_slice_spike_pct_robust_z_lt_minus4 = 0.0
-        worst_slice_spike_min_robust_z = 0.0
+        worst_slice_spike_max_abs_slice_index = -1
+        worst_slice_spike_pct_tr_abs_robust_z_gt_4 = 0.0
+        worst_slice_spike_max_abs_robust_z = 0.0
 
     return {
         "axis": "z",
@@ -1062,14 +1314,14 @@ def compute_slice_ftsnr_metrics(
             "min_voxels_ratio_of_max_slice": float(min_voxels_ratio),
             "computed_min_voxels_threshold": int(voxel_threshold),
         },
-        "slice_negative_spike_count_z_threshold": float(slice_neg_count_z),
+        "slice_spike_abs_z_threshold": z_cut,
         "worst_slice_spike_pct_slice_index": worst_slice_spike_pct_slice_index,
-        "worst_slice_spike_pct_robust_z_lt_minus4": worst_slice_spike_pct_robust_z_lt_minus4,
-        "worst_slice_spike_min_slice_index": worst_slice_spike_min_slice_index,
-        "worst_slice_spike_min_robust_z": worst_slice_spike_min_robust_z,
+        "worst_slice_spike_pct_tr_abs_robust_z_gt_4": worst_slice_spike_pct_tr_abs_robust_z_gt_4,
+        "worst_slice_spike_max_abs_slice_index": worst_slice_spike_max_abs_slice_index,
+        "worst_slice_spike_max_abs_robust_z": worst_slice_spike_max_abs_robust_z,
         "same_slice_for_both_spike_flags": bool(
             worst_slice_spike_pct_slice_index >= 0
-            and worst_slice_spike_pct_slice_index == worst_slice_spike_min_slice_index
+            and worst_slice_spike_pct_slice_index == worst_slice_spike_max_abs_slice_index
         ),
         "per_slice": per_slice,
     }
@@ -1109,7 +1361,7 @@ def _analysis_roi_mask_for_summary(
             int(ib["erosion_voxels"]),
         )
     if mode == "phantom":
-        return build_phantom_roi_mask(volume_shape_3d, parameters)
+        return build_phantom_analysis_mask(volume_shape_3d, mean_volume, parameters)
     return np.ones(volume_shape_3d, dtype=bool)
 
 
@@ -1279,6 +1531,9 @@ def run_analysis(
     output_dir: Optional[Path] = None,
     roi_size: int = 15,
     slice_index: Optional[int] = None,
+    phantom_roi_mode: str = "patch",
+    phantom_edge_erosion_voxels: int = 1,
+    phantom_full_threshold_fraction: float = 0.35,
     threshold: float = 0.25,
     erosion_voxels: int = 2,
     write_tmean_tstd: bool = False,
@@ -1297,7 +1552,13 @@ def run_analysis(
             ``<session>/derivatives/tsnr``).
         roi_size (int): Phantom ROI side.
         slice_index (Optional[int]): Phantom slice override.
-        threshold (float): Brain threshold (used for the intensity fallback and
+        phantom_roi_mode (str): Phantom ROI mode (``patch`` or
+            ``full_minus_edges``).
+        phantom_edge_erosion_voxels (int): Per-slice in-plane erosion iterations
+            for ``full_minus_edges``.
+        phantom_full_threshold_fraction (float): Intensity threshold fraction for
+            phantom ``full_minus_edges`` (vs local reference).
+        threshold (float): Brain threshold (used for centroid-seeded fallback and
             recorded in JSON; when a T1-derived mask is used, it does not define that
             mask).
         erosion_voxels (int): Brain erosion iterations (same as ``threshold`` for
@@ -1318,7 +1579,14 @@ def run_analysis(
     Raises:
         ValueError: If validation or processing fails.
     """
-    validate_common_args(mode, threshold, erosion_voxels)
+    validate_common_args(
+        mode,
+        threshold,
+        erosion_voxels,
+        phantom_roi_mode,
+        phantom_edge_erosion_voxels,
+        phantom_full_threshold_fraction,
+    )
     if not input_path.is_file():
         raise ValueError(f"Input does not exist: {input_path}")
 
@@ -1343,6 +1611,9 @@ def run_analysis(
             data_4d,
             roi_size=roi_size,
             slice_index=slice_index,
+            phantom_roi_mode=phantom_roi_mode,
+            phantom_edge_erosion_voxels=phantom_edge_erosion_voxels,
+            phantom_full_threshold_fraction=phantom_full_threshold_fraction,
             first_timepoint=first_timepoint,
             last_timepoint=last_timepoint,
         )
@@ -1365,7 +1636,7 @@ def run_analysis(
             if t1_path is None:
                 print(
                     "WARNING: No T1w found in anat/ (or BET pipeline failed) "
-                    "— falling back to intensity thresholding",
+                    "— falling back to non-T1 brain masking",
                     file=sys.stderr,
                 )
                 selected_values, parameters = extract_brain_tsnr(
@@ -1399,7 +1670,7 @@ def run_analysis(
                     brain_mask_override = None
                     print(
                         "WARNING: No T1w found in anat/ (or BET pipeline failed) "
-                        "— falling back to intensity thresholding",
+                        "— falling back to non-T1 brain masking",
                         file=sys.stderr,
                     )
                     selected_values, parameters = extract_brain_tsnr(
@@ -1454,6 +1725,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory")
     parser.add_argument("--roi-size", type=int, default=15, help="Phantom ROI side length (odd integer)")
     parser.add_argument("--slice-index", type=int, default=None, help="Phantom slice index (default: middle)")
+    parser.add_argument(
+        "--phantom-roi-mode",
+        type=str,
+        choices=("patch", "full_minus_edges"),
+        default="patch",
+        help="Phantom ROI selection mode: centered patch (default) or full phantom minus edges",
+    )
+    parser.add_argument(
+        "--phantom-edge-erosion-voxels",
+        type=int,
+        default=1,
+        help="Per-slice (x/y) erosion iterations used only with --phantom-roi-mode full_minus_edges",
+    )
+    parser.add_argument(
+        "--phantom-full-threshold-fraction",
+        type=float,
+        default=0.35,
+        metavar="F",
+        help="Intensity threshold as fraction of local reference for --phantom-roi-mode full_minus_edges (default: 0.35)",
+    )
     parser.add_argument("--threshold", type=float, default=0.25, help="Brain threshold fraction")
     parser.add_argument("--erosion-voxels", type=int, default=2, help="Brain erosion iterations")
     parser.add_argument(
@@ -1522,6 +1813,9 @@ def _run_one_analysis_from_cli(args: argparse.Namespace, input_path: Path) -> No
         output_dir=args.output_dir,
         roi_size=args.roi_size,
         slice_index=args.slice_index,
+        phantom_roi_mode=args.phantom_roi_mode,
+        phantom_edge_erosion_voxels=args.phantom_edge_erosion_voxels,
+        phantom_full_threshold_fraction=args.phantom_full_threshold_fraction,
         threshold=args.threshold,
         erosion_voxels=args.erosion_voxels,
         write_tmean_tstd=args.write_tmean_tstd,

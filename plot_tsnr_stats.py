@@ -24,35 +24,35 @@ import numpy as np
 
 METRICS: Tuple[str, ...] = ("ftsnr", "roi_mean_signal_std", "tsnr_mean")
 SLICE_METRICS: Tuple[str, ...] = (
-    "worst_slice_spike_pct_robust_z_lt_minus4",
-    "worst_slice_spike_min_robust_z",
+    "worst_slice_spike_pct_tr_abs_robust_z_gt_4",
+    "worst_slice_spike_max_abs_robust_z",
 )
 SLICE_INDEX_METRICS: Tuple[str, ...] = (
     "worst_slice_spike_pct_slice_index",
-    "worst_slice_spike_min_slice_index",
+    "worst_slice_spike_max_abs_slice_index",
 )
 SLICE_NON_SCALAR_KEYS: Tuple[str, ...] = (
     "axis",
     "eligibility_rule",
     "per_slice",
-    "slice_negative_spike_count_z_threshold",
+    "slice_spike_abs_z_threshold",
 )
 SPIKE_METRICS: Tuple[str, ...] = (
     "max_abs_robust_z",
-    "pct_tr_abs_robust_z_gt_3",
-    "n_tr_abs_robust_z_gt_3",
+    "pct_tr_abs_robust_z_gt_4",
+    "n_tr_abs_robust_z_gt_4",
 )
 METRIC_YLABEL: Dict[str, str] = {
     "ftsnr": "ftsnr",
     "roi_mean_signal_std": "roi_mean_signal_std",
     "tsnr_mean": "tsnr_mean",
     "max_abs_robust_z": "max |robust z| (ROI mean TR)",
-    "pct_tr_abs_robust_z_gt_3": "% TRs with |robust z| > 3",
-    "n_tr_abs_robust_z_gt_3": "TR count with |robust z| > 3",
-    "worst_slice_spike_pct_robust_z_lt_minus4": "worst-slice % TRs with robust z < -4",
-    "worst_slice_spike_min_robust_z": "worst-slice minimum robust z",
+    "pct_tr_abs_robust_z_gt_4": "% TRs with |robust z| > 4",
+    "n_tr_abs_robust_z_gt_4": "TR count with |robust z| > 4",
+    "worst_slice_spike_pct_tr_abs_robust_z_gt_4": "worst-slice % TRs with |robust z| > 4",
+    "worst_slice_spike_max_abs_robust_z": "worst-slice max |robust z|",
     "worst_slice_spike_pct_slice_index": "worst spike-rate slice index (Z)",
-    "worst_slice_spike_min_slice_index": "min robust z slice index (Z)",
+    "worst_slice_spike_max_abs_slice_index": "max |robust z| slice index (Z)",
     "n_slices_with_roi": "slice count with ROI support",
     "n_slices_eligible": "eligible slice count",
 }
@@ -590,6 +590,8 @@ def _plot_metric_on_axis(
     point_annotations: Optional[Dict[Tuple[str, str], str]] = None,
     subtitle_note: Optional[str] = None,
     x_axis_label: str = "Echo",
+    axis_group_label: str = "echo",
+    include_error_mode_in_title: bool = True,
 ) -> None:
     """Render one metric on a provided matplotlib axis.
     Args:
@@ -617,9 +619,9 @@ def _plot_metric_on_axis(
     n_values_all = [int(row["n_runs"]) for row in aggregated_rows]
     n_unique = sorted(set(n_values_all))
     if len(n_unique) == 1:
-        n_label = f"n per echo={n_unique[0]}"
+        n_label = f"n per {axis_group_label}={n_unique[0]}"
     else:
-        n_label = f"n per echo range={n_unique[0]}..{n_unique[-1]}"
+        n_label = f"n per {axis_group_label} range={n_unique[0]}..{n_unique[-1]}"
 
     for label, group_rows in sorted(line_groups.items(), key=lambda kv: kv[0]):
         group_rows.sort(key=lambda row: _echo_order_key(str(row["echo"])))
@@ -664,7 +666,7 @@ def _plot_metric_on_axis(
     axis.set_xlabel(x_axis_label)
     axis.set_ylabel(METRIC_YLABEL.get(metric, metric))
     ylabel = METRIC_YLABEL.get(metric, metric)
-    if show_error_bars:
+    if show_error_bars and include_error_mode_in_title:
         base_title = f"{ylabel} ({error_mode} error bars; {n_label})"
     else:
         base_title = f"{ylabel} ({n_label})"
@@ -741,8 +743,6 @@ def _panel_suptitle_qa_sessions(
 ) -> str:
     """Build core-panel title for phantom QA-session comparisons."""
     _ = (subject, session, group_by_task)
-    if show_error_bars:
-        return "tSNR/fTSNR summary across QA sessions (with error bars)"
     return "tSNR/fTSNR summary across QA sessions"
 
 
@@ -754,8 +754,6 @@ def _spike_panel_suptitle_qa_sessions(
 ) -> str:
     """Build spike-panel title for phantom QA-session comparisons."""
     _ = (subject, session, group_by_task)
-    if show_error_bars:
-        return "ROI mean TR spike metrics (robust z) across QA sessions (with error bars)"
     return "ROI mean TR spike metrics (robust z) across QA sessions"
 
 
@@ -767,8 +765,6 @@ def _slice_panel_suptitle_qa_sessions(
 ) -> str:
     """Build slice-panel title for phantom QA-session comparisons."""
     _ = (subject, session, group_by_task)
-    if show_error_bars:
-        return "Slice-level spike summary across QA sessions (with error bars)"
     return "Slice-level spike summary across QA sessions"
 
 
@@ -797,7 +793,9 @@ def plot_slice_metric_panel(
     session: Optional[str],
     show_error_bars: bool,
     x_axis_label: str = "Echo",
+    axis_group_label: str = "echo",
     suptitle_fn: Callable[..., str] = _slice_panel_suptitle,
+    include_error_mode_in_title: bool = True,
 ) -> None:
     """Render two-panel slice summary with Z-index annotations on points."""
     fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=False)
@@ -807,31 +805,35 @@ def plot_slice_metric_panel(
         group_by_task=group_by_task,
     )
     bottom_ann = _slice_annotation_lookup(
-        aggregated_by_metric.get("worst_slice_spike_min_slice_index", []),
-        annotation_metric="worst_slice_spike_min_slice_index",
+        aggregated_by_metric.get("worst_slice_spike_max_abs_slice_index", []),
+        annotation_metric="worst_slice_spike_max_abs_slice_index",
         group_by_task=group_by_task,
     )
     _plot_metric_on_axis(
         axes[0],
-        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_pct_robust_z_lt_minus4", []),
-        metric="worst_slice_spike_pct_robust_z_lt_minus4",
+        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_pct_tr_abs_robust_z_gt_4", []),
+        metric="worst_slice_spike_pct_tr_abs_robust_z_gt_4",
         error_mode=error_mode,
         group_by_task=group_by_task,
         show_error_bars=show_error_bars,
         point_annotations=top_ann,
-        subtitle_note="Z=slice for worst % (robust z < -4)",
+        subtitle_note="Z=slice for worst % (|robust z|>4)",
         x_axis_label=x_axis_label,
+        axis_group_label=axis_group_label,
+        include_error_mode_in_title=include_error_mode_in_title,
     )
     _plot_metric_on_axis(
         axes[1],
-        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_min_robust_z", []),
-        metric="worst_slice_spike_min_robust_z",
+        aggregated_rows=aggregated_by_metric.get("worst_slice_spike_max_abs_robust_z", []),
+        metric="worst_slice_spike_max_abs_robust_z",
         error_mode=error_mode,
         group_by_task=group_by_task,
         show_error_bars=show_error_bars,
         point_annotations=bottom_ann,
-        subtitle_note="Z=slice for min robust z (y-axis)",
+        subtitle_note="Z=slice for max |robust z| (y-axis)",
         x_axis_label=x_axis_label,
+        axis_group_label=axis_group_label,
+        include_error_mode_in_title=include_error_mode_in_title,
     )
     fig.suptitle(
         suptitle_fn(
@@ -860,6 +862,8 @@ def plot_metric_panel(
     figsize: Tuple[float, float] = (11, 14),
     show_error_bars: bool = True,
     x_axis_label: str = "Echo",
+    axis_group_label: str = "echo",
+    include_error_mode_in_title: bool = True,
 ) -> None:
     """Render metrics as one PNG with stacked subplots.
     Args:
@@ -888,6 +892,8 @@ def plot_metric_panel(
             group_by_task=group_by_task,
             show_error_bars=show_error_bars,
             x_axis_label=x_axis_label,
+            axis_group_label=axis_group_label,
+            include_error_mode_in_title=include_error_mode_in_title,
         )
     fig.suptitle(
         suptitle_fn(
@@ -959,14 +965,14 @@ def _robust_z_series_for_tr_plot(raw_roi_mean: Sequence[float]) -> List[float]:
     return [float(x) for x in z]
 
 
-def _count_abs_robust_z_gt_3(zr: Sequence[float]) -> int:
-    """Count TRs with absolute robust z strictly greater than 3 (plot convention).
+def _count_abs_robust_z_gt_4(zr: Sequence[float]) -> int:
+    """Count TRs with absolute robust z strictly greater than 4 (plot convention).
     Args:
         zr (Sequence[float]): Per-TR robust z values shown in the figure.
     Returns:
-        int: Number of TRs with ``|z| > 3``.
+        int: Number of TRs with ``|z| > 4``.
     """
-    return sum(1 for z in zr if abs(float(z)) > 3.0)
+    return sum(1 for z in zr if abs(float(z)) > 4.0)
 
 
 def roi_mean_signal_series_from_spike_block(spike: object) -> Optional[List[float]]:
@@ -1070,14 +1076,14 @@ def plot_robust_z_tr_session_grid(
         r, c = divmod(idx, ncols)
         ax = axes[r][c]
         x = np.arange(len(zr), dtype=np.float64)
-        ax.axhline(3.0, color="gray", linestyle="--", linewidth=0.9, alpha=0.85)
-        ax.axhline(-3.0, color="gray", linestyle="--", linewidth=0.9, alpha=0.85)
+        ax.axhline(4.0, color="gray", linestyle="--", linewidth=0.9, alpha=0.85)
+        ax.axhline(-4.0, color="gray", linestyle="--", linewidth=0.9, alpha=0.85)
         ax.axhline(0.0, color="lightgray", linestyle="-", linewidth=0.65)
         ax.plot(x, zr, linewidth=0.95, color="C0")
         ax.set_xlim(0, max(len(zr) - 1, 0))
-        n_gt3 = _count_abs_robust_z_gt_3(zr)
+        n_gt4 = _count_abs_robust_z_gt_4(zr)
         line1 = stem if len(stem) <= 44 else stem[:41] + "..."
-        title = f"{line1}\n|z|>3: {n_gt3} TRs"
+        title = f"{line1}\n|z|>4: {n_gt4} TRs"
         ax.set_title(title, fontsize=8)
         ax.set_xlabel("TR index", fontsize=8)
         ax.set_ylabel("robust z", fontsize=8)
@@ -1180,6 +1186,7 @@ def run_report(
     show_error_bars: bool = True,
     phantom_stats_dir: Optional[Path] = None,
     label_by: str = "auto",
+    spike_metrics_panels: bool = False,
 ) -> List[Path]:
     """Generate PNG summary plots and CSV.
     Args:
@@ -1194,6 +1201,8 @@ def run_report(
         show_error_bars (bool): When False, echo panels use lines without y error bars.
         phantom_stats_dir (Optional[Path]): Directory with phantom ``*_tsnr_stats.json`` files (phantom mode).
         label_by (str): Phantom label mode: ``auto``, ``metadata_date``, or ``filename_date``.
+        spike_metrics_panels (bool): When True and all inputs carry ROI spike metrics, write the
+            spike-metrics PNG and add spike fields to the summary CSV (default off).
     Returns:
         List[Path]: Paths generated by this run.
     Raises:
@@ -1206,7 +1215,10 @@ def run_report(
         subject = "phantom"
         session = "qa-series"
         group_by_task = False
-        x_axis_label = "QA session"
+        x_axis_label = "By session"
+        axis_group_label = "session"
+        panel_suffix = "session"
+        include_error_mode_in_title = False
         core_suptitle_fn = _panel_suptitle_qa_sessions
         spike_suptitle_fn = _spike_panel_suptitle_qa_sessions
         slice_suptitle_fn = _slice_panel_suptitle_qa_sessions
@@ -1216,6 +1228,9 @@ def run_report(
         stats_files = discover_stats_files(bids_root)
         rows = filter_rows(load_metric_rows(stats_files), subject=subject, session=session)
         x_axis_label = "Echo"
+        axis_group_label = "echo"
+        panel_suffix = "echo"
+        include_error_mode_in_title = True
         core_suptitle_fn = _panel_suptitle
         spike_suptitle_fn = _spike_panel_suptitle
         slice_suptitle_fn = _slice_panel_suptitle
@@ -1231,7 +1246,7 @@ def run_report(
     for metric in METRICS:
         aggregated = aggregate_metric_rows(rows, metric=metric, error_mode=error_mode, group_by_task=group_by_task)
         aggregated_by_metric[metric] = aggregated
-    panel_path = out_dir / f"metrics_panel_by_echo_{error_mode}.png"
+    panel_path = out_dir / f"metrics_panel_by_{panel_suffix}_{error_mode}.png"
     plot_metric_panel(
         aggregated_by_metric=aggregated_by_metric,
         metric_order=METRICS,
@@ -1243,18 +1258,20 @@ def run_report(
         suptitle_fn=core_suptitle_fn,
         show_error_bars=show_error_bars,
         x_axis_label=x_axis_label,
+        axis_group_label=axis_group_label,
+        include_error_mode_in_title=include_error_mode_in_title,
     )
     generated.append(panel_path)
 
     has_all_spikes = bool(rows) and all(bool(r.get("has_spike_metrics")) for r in rows)
     has_all_slice_metrics = bool(rows) and all(bool(r.get("has_slice_metrics")) for r in rows)
     csv_metric_names: List[str] = list(METRICS)
-    if has_all_spikes:
+    if spike_metrics_panels and has_all_spikes:
         for metric in SPIKE_METRICS:
             aggregated_by_metric[metric] = aggregate_metric_rows(
                 rows, metric=metric, error_mode=error_mode, group_by_task=group_by_task
             )
-        spike_path = out_dir / f"spike_metrics_panel_by_echo_{error_mode}.png"
+        spike_path = out_dir / f"spike_metrics_panel_by_{panel_suffix}_{error_mode}.png"
         plot_metric_panel(
             aggregated_by_metric=aggregated_by_metric,
             metric_order=SPIKE_METRICS,
@@ -1267,10 +1284,12 @@ def run_report(
             figsize=(11, 12),
             show_error_bars=show_error_bars,
             x_axis_label=x_axis_label,
+            axis_group_label=axis_group_label,
+            include_error_mode_in_title=include_error_mode_in_title,
         )
         generated.append(spike_path)
         csv_metric_names.extend(SPIKE_METRICS)
-    else:
+    elif spike_metrics_panels and not has_all_spikes:
         print(
             "Warning: skipping spike metric plots and CSV rows (not every stats JSON "
             "includes roi_mean_tr_spike_metrics with all required keys)."
@@ -1280,7 +1299,7 @@ def run_report(
             aggregated_by_metric[metric] = aggregate_metric_rows(
                 rows, metric=metric, error_mode=error_mode, group_by_task=group_by_task
             )
-        slice_path = out_dir / f"slice_metrics_panel_by_echo_{error_mode}.png"
+        slice_path = out_dir / f"slice_metrics_panel_by_{panel_suffix}_{error_mode}.png"
         plot_slice_metric_panel(
             aggregated_by_metric=aggregated_by_metric,
             error_mode=error_mode,
@@ -1290,7 +1309,9 @@ def run_report(
             session=session,
             show_error_bars=show_error_bars,
             x_axis_label=x_axis_label,
+            axis_group_label=axis_group_label,
             suptitle_fn=slice_suptitle_fn,
+            include_error_mode_in_title=include_error_mode_in_title,
         )
         generated.append(slice_path)
         csv_metric_names.extend(SLICE_METRICS + SLICE_INDEX_METRICS)
@@ -1419,6 +1440,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also write roi_mean_signal_vs_tr_<subject>_<session>.png: raw ROI-mean fMRI signal vs TR "
         "(requires --subject and --session; needs roi_mean_signal_per_tr in each stats JSON).",
     )
+    parser.add_argument(
+        "--spike-metrics-panels",
+        action="store_true",
+        help="Also write spike_metrics_panel_by_*_<error>.png and add ROI spike metrics to the CSV "
+        "(requires roi_mean_tr_spike_metrics with max_abs_robust_z, pct/n TR |z|>4 in every stats JSON). "
+        "Default reports omit this figure.",
+    )
     return parser
 
 
@@ -1471,6 +1499,7 @@ def cli(argv: Optional[List[str]] = None) -> int:
             show_error_bars=show_error_bars,
             phantom_stats_dir=phantom_stats_dir,
             label_by=str(args.label_by),
+            spike_metrics_panels=bool(args.spike_metrics_panels),
         )
     except ValueError as exc:
         print(f"Error: {exc}")

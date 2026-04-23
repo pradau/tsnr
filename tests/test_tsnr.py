@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tsnr import (
+    build_brain_mask,
     cli,
     compute_slice_ftsnr_metrics,
     compute_roi_tr_spike_metrics,
@@ -73,7 +74,7 @@ def test_compute_roi_tr_spike_metrics_empty_array() -> None:
     """Empty ROI-mean series yields zero counts and n_timepoints 0."""
     out = compute_roi_tr_spike_metrics(np.array([], dtype=np.float64))
     assert out["n_timepoints"] == 0
-    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert out["n_tr_abs_robust_z_gt_4"] == 0
     assert out["roi_mean_signal_per_tr"] == []
 
 
@@ -82,7 +83,7 @@ def test_compute_roi_tr_spike_metrics_single_timepoint() -> None:
     out = compute_roi_tr_spike_metrics(np.array([42.0]))
     assert out["n_timepoints"] == 1
     assert out["robust_median"] == pytest.approx(42.0)
-    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert out["n_tr_abs_robust_z_gt_4"] == 0
     assert out["roi_mean_signal_per_tr"] == [42.0]
 
 
@@ -93,7 +94,7 @@ def test_compute_roi_tr_spike_metrics_constant_series() -> None:
     assert len(out["robust_z_per_tr"]) == 30
     assert float(np.max(np.abs(np.asarray(out["robust_z_per_tr"], dtype=np.float64)))) < 1e-9
     assert out["max_abs_robust_z"] == pytest.approx(0.0)
-    assert out["n_tr_abs_robust_z_gt_3"] == 0
+    assert out["n_tr_abs_robust_z_gt_4"] == 0
     assert len(out["roi_mean_signal_per_tr"]) == 30
     assert out["roi_mean_signal_per_tr"][0] == pytest.approx(3.14)
 
@@ -104,9 +105,9 @@ def test_compute_roi_tr_spike_metrics_single_large_spike() -> None:
     series[30] = 50_000.0
     out = compute_roi_tr_spike_metrics(series)
     assert out["n_timepoints"] == 60
-    assert int(out["n_tr_abs_robust_z_gt_3"]) >= 1
-    assert float(out["max_abs_robust_z"]) > 3.0
-    assert float(out["pct_tr_abs_robust_z_gt_3"]) == pytest.approx(100.0 / 60.0, rel=1e-9)
+    assert int(out["n_tr_abs_robust_z_gt_4"]) >= 1
+    assert float(out["max_abs_robust_z"]) > 4.0
+    assert float(out["pct_tr_abs_robust_z_gt_4"]) == pytest.approx(100.0 / 60.0, rel=1e-9)
 
 
 def make_phantom_data(shape: Tuple[int, int, int, int]) -> np.ndarray:
@@ -419,7 +420,7 @@ def test_find_t1_in_anat_fallback_mtime_when_no_sidecar_time(tmp_path: Path) -> 
 
 def test_nifti_brain_happy_path(tmp_path: Path) -> None:
     """
-    Brain analysis uses positive-voxel baseline and erosion.
+    Brain analysis uses fallback masking when no T1 is available.
     """
     data = np.zeros((9, 9, 5, 6), dtype=np.float64)
     data[2:7, 2:7, 1:4, :] = 100.0
@@ -439,10 +440,13 @@ def test_nifti_brain_happy_path(tmp_path: Path) -> None:
     assert stats["mode"] == "brain"
     assert stats["n_voxels_in_roi"] > 0
     assert params["mask_baseline_mean_positive_signal"] > 0.0
+    assert params["intensity_brain_mask"]["method"] == "centroid_seeded"
+    assert params["intensity_brain_mask"]["reference_radius_voxels"] == 15
+    assert params["intensity_brain_mask"]["reference_percentile"] == pytest.approx(90.0)
     assert params["intensity_brain_mask"]["erosion_voxels"] == 1
     assert params["intensity_brain_mask"]["threshold"] == 0.25
     bm = params["brain_masking"]
-    assert bm["method"] == "mean_intensity"
+    assert bm["method"] == "centroid_seeded"
     assert bm["t1_to_functional_pipeline"] == "not_attempted_no_t1"
     assert bm["t1_path"] is None
     assert bm["detail"] is not None
@@ -478,10 +482,28 @@ def test_brain_masking_json_when_t1_pipeline_fails(tmp_path: Path) -> None:
         )
     stats = load_stats(stats_path)
     bm = stats["parameters"]["brain_masking"]
-    assert bm["method"] == "mean_intensity"
+    assert bm["method"] == "centroid_seeded"
     assert bm["t1_to_functional_pipeline"] == "failed"
     assert bm["t1_path"] == str(t1.resolve())
     assert "synthetic FSL failure" in (bm["detail"] or "")
+
+
+def test_centroid_seeded_brain_mask_keeps_one_component_after_erosion() -> None:
+    """Centroid-seeded cleanup removes islands created by erosion bridge breaks."""
+    from scipy.ndimage import label
+
+    mean_volume = np.zeros((15, 15, 5), dtype=np.float64)
+    mean_volume[3:7, 3:7, 1:4] = 100.0
+    mean_volume[7:9, 6:9, 1:4] = 100.0
+    mean_volume[9:13, 8:12, 1:4] = 100.0
+    mask = build_brain_mask(
+        mean_volume,
+        threshold=0.25,
+        erosion_voxels=1,
+    )
+    labeled, _ = label(mask)
+    component_sizes = np.bincount(labeled.ravel())
+    assert int(np.sum(component_sizes[1:] > 0)) == 1
 
 
 def test_compute_slice_ftsnr_metrics_excludes_low_support_slices() -> None:
@@ -530,11 +552,13 @@ def test_brain_slice_ftsnr_metrics_flags_corrupted_slice(tmp_path: Path) -> None
     assert sf["axis"] == "z"
     assert sf["n_slices_eligible"] >= 2
     assert int(sf["worst_slice_spike_pct_slice_index"]) == 2
-    assert int(sf["worst_slice_spike_min_slice_index"]) == 2
+    assert int(sf["worst_slice_spike_max_abs_slice_index"]) == 2
     assert bool(sf["same_slice_for_both_spike_flags"]) is True
     per_slice = {int(row["slice_index"]): row for row in sf["per_slice"]}
-    assert float(per_slice[2]["slice_pct_robust_z_lt_minus4"]) > float(per_slice[1]["slice_pct_robust_z_lt_minus4"])
-    assert float(per_slice[2]["slice_min_robust_z"]) < float(per_slice[1]["slice_min_robust_z"])
+    assert float(per_slice[2]["slice_pct_tr_abs_robust_z_gt_4"]) > float(
+        per_slice[1]["slice_pct_tr_abs_robust_z_gt_4"]
+    )
+    assert float(per_slice[2]["slice_max_abs_robust_z"]) > float(per_slice[1]["slice_max_abs_robust_z"])
 
 
 def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
@@ -557,7 +581,7 @@ def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
     assert stats["roi_mean_signal_std"] == 0.0
     spikes = stats["roi_mean_tr_spike_metrics"]
     assert isinstance(spikes, dict)
-    assert int(spikes["n_tr_abs_robust_z_gt_3"]) == 0
+    assert int(spikes["n_tr_abs_robust_z_gt_4"]) == 0
 
 
 def test_roi_mean_tr_spike_metrics_detect_strong_outlier(tmp_path: Path) -> None:
@@ -569,8 +593,8 @@ def test_roi_mean_tr_spike_metrics_detect_strong_outlier(tmp_path: Path) -> None
     _, stats_path, _ = run_analysis(input_path=input_path, mode="phantom")
     stats = load_stats(stats_path)
     spikes = stats["roi_mean_tr_spike_metrics"]
-    assert int(spikes["n_tr_abs_robust_z_gt_3"]) >= 1
-    assert float(spikes["max_abs_robust_z"]) > 3.0
+    assert int(spikes["n_tr_abs_robust_z_gt_4"]) >= 1
+    assert float(spikes["max_abs_robust_z"]) > 4.0
 
 
 def test_phantom_roi_near_boundary_is_shifted(tmp_path: Path) -> None:
@@ -869,3 +893,105 @@ def test_full_fov_maps_cli_flag(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert load_stats(tmp_path / "p_tsnr_stats.json")["output_map_censoring"] == "full_fov"
+
+
+def test_phantom_full_minus_edges_happy_path(tmp_path: Path) -> None:
+    """Full-minus-edges phantom mode yields valid stats and parameters."""
+    data = make_phantom_data((15, 15, 5, 6))
+    input_path = tmp_path / "phantom_full.nii.gz"
+    write_nifti(input_path, data)
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        phantom_roi_mode="full_minus_edges",
+        phantom_edge_erosion_voxels=1,
+        first_timepoint=0,
+    )
+    stats = load_stats(stats_path)
+    assert stats["mode"] == "phantom"
+    assert int(stats["n_voxels_in_roi"]) > 0
+    params = stats["parameters"]
+    assert params["phantom_roi_mode"] == "full_minus_edges"
+    fpm = params["full_phantom_mask"]
+    assert fpm["source"] == "centroid_seeded_region_grow_3d_above_fraction_of_local_centroid_percentile"
+    assert int(fpm["reference_radius_voxels"]) == 15
+    assert float(fpm["reference_percentile"]) == pytest.approx(90.0)
+    assert float(fpm["threshold_fraction"]) == pytest.approx(0.35)
+    assert int(fpm["edge_erosion_voxels"]) == 1
+    assert fpm["erosion_axis"] == "xy_per_slice"
+    assert "roi_bounds" not in params
+
+
+def test_phantom_default_patch_mode_retains_roi_contract(tmp_path: Path) -> None:
+    """Default phantom mode remains centered patch ROI behavior."""
+    data = make_phantom_data((13, 13, 5, 6))
+    input_path = tmp_path / "phantom_patch.nii.gz"
+    write_nifti(input_path, data)
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        roi_size=11,
+        first_timepoint=0,
+    )
+    params = load_stats(stats_path)["parameters"]
+    assert params["phantom_roi_mode"] == "patch"
+    assert int(params["roi_size"]) == 11
+    assert "slice_index" in params
+    assert "roi_bounds" in params
+
+
+def test_masked_maps_match_roi_voxel_count_phantom_full_minus_edges(tmp_path: Path) -> None:
+    """Map NaN-censoring matches ROI voxel count for full-minus-edges mode."""
+    data = make_phantom_data((15, 15, 5, 6))
+    input_path = tmp_path / "phantom_mask.nii.gz"
+    write_nifti(input_path, data)
+    map_path, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        phantom_roi_mode="full_minus_edges",
+        phantom_edge_erosion_voxels=1,
+        first_timepoint=0,
+    )
+    stats = load_stats(stats_path)
+    vox = np.asarray(nib.load(str(map_path)).get_fdata(dtype=np.float64))
+    assert int(np.sum(np.isfinite(vox))) == int(stats["n_voxels_in_roi"])
+
+
+def test_cli_phantom_full_minus_edges_writes_params(tmp_path: Path) -> None:
+    """CLI path accepts --phantom-roi-mode full_minus_edges."""
+    data = make_phantom_data((15, 15, 5, 6))
+    input_path = tmp_path / "cli_full.nii.gz"
+    write_nifti(input_path, data)
+    rc = cli(
+        [
+            str(input_path),
+            "phantom",
+            "--output-dir",
+            str(tmp_path),
+            "--first-timepoint",
+            "0",
+            "--phantom-roi-mode",
+            "full_minus_edges",
+            "--phantom-edge-erosion-voxels",
+            "1",
+        ]
+    )
+    assert rc == 0
+    params = load_stats(tmp_path / "cli_full_tsnr_stats.json")["parameters"]
+    assert params["phantom_roi_mode"] == "full_minus_edges"
+
+
+def test_phantom_full_minus_edges_empty_after_erosion_fails(tmp_path: Path) -> None:
+    """If erosion removes the full phantom mask, analysis raises a clear error."""
+    data = np.zeros((11, 11, 3, 5), dtype=np.float64)
+    data[5, 5, :, :] = 100.0
+    input_path = tmp_path / "thin_phantom.nii.gz"
+    write_nifti(input_path, data)
+    with pytest.raises(ValueError, match="phantom mask is empty after edge erosion"):
+        run_analysis(
+            input_path=input_path,
+            mode="phantom",
+            phantom_roi_mode="full_minus_edges",
+            phantom_edge_erosion_voxels=1,
+            first_timepoint=0,
+        )

@@ -27,7 +27,7 @@ import numpy as np
 from plot_tsnr_stats import (
     default_out_dir_for_phantom_stats_dir,
     discover_phantom_stats_files,
-    _count_abs_robust_z_gt_3,
+    _count_abs_robust_z_gt_4,
     cli as plot_cli,
     aggregate_metric_rows,
     discover_session_stats_files,
@@ -53,14 +53,14 @@ def _write_stats(
     roi_std: float,
     *,
     max_abs_robust_z: float = 2.0,
-    pct_tr_abs_robust_z_gt_3: float = 0.0,
-    n_tr_abs_robust_z_gt_3: float = 0.0,
+    pct_tr_abs_robust_z_gt_4: float = 0.0,
+    n_tr_abs_robust_z_gt_4: float = 0.0,
     robust_z_len: int = 12,
     include_slice_metrics: bool = True,
-    worst_slice_spike_pct_robust_z_lt_minus4: float = 12.5,
-    worst_slice_spike_min_robust_z: float = -6.2,
+    worst_slice_spike_pct_tr_abs_robust_z_gt_4: float = 12.5,
+    worst_slice_spike_max_abs_robust_z: float = 6.2,
     worst_slice_spike_pct_slice_index: int = 4,
-    worst_slice_spike_min_slice_index: int = 7,
+    worst_slice_spike_max_abs_slice_index: int = 7,
     n_slices_with_roi: int = 24,
     n_slices_eligible: int = 18,
 ) -> None:
@@ -72,8 +72,8 @@ def _write_stats(
         ftsnr (float): Functional tSNR.
         roi_std (float): ROI mean temporal std.
         max_abs_robust_z (float): Spike metric for tests.
-        pct_tr_abs_robust_z_gt_3 (float): Spike metric for tests.
-        n_tr_abs_robust_z_gt_3 (float): Spike metric for tests.
+        pct_tr_abs_robust_z_gt_4 (float): Spike metric for tests.
+        n_tr_abs_robust_z_gt_4 (float): Spike metric for tests.
     Returns:
         None: This function returns nothing.
     """
@@ -84,18 +84,20 @@ def _write_stats(
         "roi_mean_signal_std": roi_std,
         "roi_mean_tr_spike_metrics": {
             "max_abs_robust_z": max_abs_robust_z,
-            "pct_tr_abs_robust_z_gt_3": pct_tr_abs_robust_z_gt_3,
-            "n_tr_abs_robust_z_gt_3": n_tr_abs_robust_z_gt_3,
+            "pct_tr_abs_robust_z_gt_4": pct_tr_abs_robust_z_gt_4,
+            "n_tr_abs_robust_z_gt_4": n_tr_abs_robust_z_gt_4,
             "robust_z_per_tr": [0.1 * float(i % 5) for i in range(robust_z_len)],
             "roi_mean_signal_per_tr": [1000.0 + 0.5 * float(i) for i in range(robust_z_len)],
         },
     }
     if include_slice_metrics:
         payload["slice_ftsnr_metrics"] = {
-            "worst_slice_spike_pct_robust_z_lt_minus4": float(worst_slice_spike_pct_robust_z_lt_minus4),
-            "worst_slice_spike_min_robust_z": float(worst_slice_spike_min_robust_z),
+            "worst_slice_spike_pct_tr_abs_robust_z_gt_4": float(
+                worst_slice_spike_pct_tr_abs_robust_z_gt_4
+            ),
+            "worst_slice_spike_max_abs_robust_z": float(worst_slice_spike_max_abs_robust_z),
             "worst_slice_spike_pct_slice_index": int(worst_slice_spike_pct_slice_index),
-            "worst_slice_spike_min_slice_index": int(worst_slice_spike_min_slice_index),
+            "worst_slice_spike_max_abs_slice_index": int(worst_slice_spike_max_abs_slice_index),
             "n_slices_with_roi": int(n_slices_with_roi),
             "n_slices_eligible": int(n_slices_eligible),
         }
@@ -137,8 +139,8 @@ def _make_dataset(tmp_path: Path) -> Path:
             ft,
             roi,
             max_abs_robust_z=mz,
-            pct_tr_abs_robust_z_gt_3=pct,
-            n_tr_abs_robust_z_gt_3=nt,
+            pct_tr_abs_robust_z_gt_4=pct,
+            n_tr_abs_robust_z_gt_4=nt,
         )
     return root
 
@@ -155,10 +157,11 @@ def test_roi_mean_signal_series_from_spike_block() -> None:
     assert roi_mean_signal_series_from_spike_block({"roi_mean_signal_per_tr": [1.0, 2.0]}) == [1.0, 2.0]
 
 
-def test_count_abs_robust_z_gt_3() -> None:
-    """Outlier count matches |z| > 3 rule."""
-    assert _count_abs_robust_z_gt_3([0.0, 3.0, 3.01, -3.001]) == 2
-    assert _count_abs_robust_z_gt_3([]) == 0
+def test_count_abs_robust_z_gt_4() -> None:
+    """Outlier count matches |z| > 4 rule."""
+    assert _count_abs_robust_z_gt_4([0.0, 4.0, 4.01, -4.001]) == 2
+    assert _count_abs_robust_z_gt_4([0.0, 3.0, 3.5, -3.5]) == 0
+    assert _count_abs_robust_z_gt_4([]) == 0
 
 
 def test_tr_plot_z_linear_ramp_near_zero_after_detrend() -> None:
@@ -218,19 +221,36 @@ def test_run_report_creates_png_and_csv(tmp_path: Path) -> None:
     root = _make_dataset(tmp_path)
     out_dir = tmp_path / "reports" / "tsnr_plots"
     generated = run_report(root, out_dir=out_dir, error_mode="ci95", group_by_task=False)
-    assert len(generated) == 4
+    assert len(generated) == 3
     expected = [
         out_dir / "metrics_panel_by_echo_ci95.png",
-        out_dir / "spike_metrics_panel_by_echo_ci95.png",
         out_dir / "slice_metrics_panel_by_echo_ci95.png",
         out_dir / "aggregated_metric_summary.csv",
     ]
     for path in expected:
         assert path.exists()
         assert path in generated
+    assert (out_dir / "spike_metrics_panel_by_echo_ci95.png").exists() is False
     csv_text = (out_dir / "aggregated_metric_summary.csv").read_text(encoding="utf-8")
     header = csv_text.splitlines()[0]
     assert header == "metric,sub,ses,echo,task,n_runs,mean,error"
+
+
+def test_run_report_spike_metrics_panels_opt_in(tmp_path: Path) -> None:
+    """ROI spike figure and CSV rows are produced only when spike_metrics_panels is True."""
+    root = _make_dataset(tmp_path)
+    out_dir = tmp_path / "reports" / "spike_on"
+    generated = run_report(
+        root,
+        out_dir=out_dir,
+        error_mode="ci95",
+        group_by_task=False,
+        spike_metrics_panels=True,
+    )
+    assert out_dir / "spike_metrics_panel_by_echo_ci95.png" in generated
+    assert (out_dir / "spike_metrics_panel_by_echo_ci95.png").exists()
+    text = (out_dir / "aggregated_metric_summary.csv").read_text(encoding="utf-8")
+    assert any(line.startswith("max_abs_robust_z,") for line in text.splitlines()[1:])
 
 
 def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
@@ -243,8 +263,8 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
         130.0,
         0.8,
         max_abs_robust_z=3.0,
-        pct_tr_abs_robust_z_gt_3=1.0,
-        n_tr_abs_robust_z_gt_3=2.0,
+        pct_tr_abs_robust_z_gt_4=1.0,
+        n_tr_abs_robust_z_gt_4=2.0,
     )
     _write_stats(
         root / "sub-3334/ses-1a/derivatives/tsnr/sub-3334_ses-1a_task-laluna_echo-2_bold_tsnr_stats.json",
@@ -253,8 +273,8 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
         120.0,
         0.9,
         max_abs_robust_z=3.1,
-        pct_tr_abs_robust_z_gt_3=2.0,
-        n_tr_abs_robust_z_gt_3=3.0,
+        pct_tr_abs_robust_z_gt_4=2.0,
+        n_tr_abs_robust_z_gt_4=3.0,
     )
     _write_stats(
         root / "sub-3334/ses-1a/derivatives/tsnr/sub-3334_ses-1a_task-partlycloudy_echo-1_bold_tsnr_stats.json",
@@ -263,8 +283,8 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
         115.0,
         1.0,
         max_abs_robust_z=4.0,
-        pct_tr_abs_robust_z_gt_3=0.5,
-        n_tr_abs_robust_z_gt_3=1.0,
+        pct_tr_abs_robust_z_gt_4=0.5,
+        n_tr_abs_robust_z_gt_4=1.0,
     )
     _write_stats(
         root / "sub-3334/ses-1a/derivatives/tsnr/sub-3334_ses-1a_task-partlycloudy_echo-2_bold_tsnr_stats.json",
@@ -273,8 +293,8 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
         110.0,
         1.1,
         max_abs_robust_z=4.1,
-        pct_tr_abs_robust_z_gt_3=1.5,
-        n_tr_abs_robust_z_gt_3=2.0,
+        pct_tr_abs_robust_z_gt_4=1.5,
+        n_tr_abs_robust_z_gt_4=2.0,
     )
     out_dir = tmp_path / "reports" / "tsnr_plots"
     generated = run_report(
@@ -292,10 +312,12 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
     assert "task-laluna" in text
     assert "task-partlycloudy" in text
     assert "ftsnr,sub-3334,ses-1a,echo-1,task-laluna," in text
-    assert "max_abs_robust_z,sub-3334,ses-1a,echo-1,task-laluna," in text
-    assert "worst_slice_spike_pct_robust_z_lt_minus4,sub-3334,ses-1a,echo-1,task-laluna," in text
-    assert "worst_slice_spike_min_slice_index,sub-3334,ses-1a,echo-1,task-laluna," in text
-    assert (out_dir / "spike_metrics_panel_by_echo_sem.png").exists()
+    assert not any(
+        line.split(",", 1)[0] == "max_abs_robust_z" for line in text.splitlines()[1:]
+    )
+    assert "worst_slice_spike_pct_tr_abs_robust_z_gt_4,sub-3334,ses-1a,echo-1,task-laluna," in text
+    assert "worst_slice_spike_max_abs_slice_index,sub-3334,ses-1a,echo-1,task-laluna," in text
+    assert (out_dir / "spike_metrics_panel_by_echo_sem.png").exists() is False
     assert (out_dir / "slice_metrics_panel_by_echo_sem.png").exists()
 
 
@@ -321,7 +343,7 @@ def test_run_report_skips_slice_plots_when_missing_slice_metrics(tmp_path: Path)
     out_dir = tmp_path / "reports" / "tsnr_plots"
     generated = run_report(root, out_dir=out_dir, error_mode="sem", group_by_task=False)
     assert (out_dir / "metrics_panel_by_echo_sem.png") in generated
-    assert (out_dir / "spike_metrics_panel_by_echo_sem.png") in generated
+    assert (out_dir / "spike_metrics_panel_by_echo_sem.png") not in generated
     assert (out_dir / "aggregated_metric_summary.csv") in generated
     assert (out_dir / "slice_metrics_panel_by_echo_sem.png") not in generated
 
@@ -434,8 +456,8 @@ def test_run_report_phantom_mode_generates_outputs(tmp_path: Path) -> None:
         120.0,
         0.85,
         max_abs_robust_z=2.1,
-        pct_tr_abs_robust_z_gt_3=0.5,
-        n_tr_abs_robust_z_gt_3=1.0,
+        pct_tr_abs_robust_z_gt_4=0.5,
+        n_tr_abs_robust_z_gt_4=1.0,
     )
     _write_stats(
         stats_dir / "AlbertaChildrensHospital_Basic_fMRIQASnap_2026_04_02__E53214S1_tsnr_stats.json",
@@ -444,8 +466,8 @@ def test_run_report_phantom_mode_generates_outputs(tmp_path: Path) -> None:
         110.0,
         0.90,
         max_abs_robust_z=2.2,
-        pct_tr_abs_robust_z_gt_3=1.0,
-        n_tr_abs_robust_z_gt_3=2.0,
+        pct_tr_abs_robust_z_gt_4=1.0,
+        n_tr_abs_robust_z_gt_4=2.0,
     )
     out_dir = default_out_dir_for_phantom_stats_dir(stats_dir)
     generated = run_report(
@@ -456,9 +478,9 @@ def test_run_report_phantom_mode_generates_outputs(tmp_path: Path) -> None:
         phantom_stats_dir=stats_dir,
         label_by="filename_date",
     )
-    assert out_dir / "metrics_panel_by_echo_sem.png" in generated
-    assert out_dir / "spike_metrics_panel_by_echo_sem.png" in generated
-    assert out_dir / "slice_metrics_panel_by_echo_sem.png" in generated
+    assert out_dir / "metrics_panel_by_session_sem.png" in generated
+    assert out_dir / "spike_metrics_panel_by_session_sem.png" not in generated
+    assert out_dir / "slice_metrics_panel_by_session_sem.png" in generated
     assert out_dir / "aggregated_metric_summary.csv" in generated
     csv_text = (out_dir / "aggregated_metric_summary.csv").read_text(encoding="utf-8")
     assert "2024-03-11" in csv_text
