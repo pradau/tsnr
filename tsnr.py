@@ -1262,27 +1262,29 @@ def compute_slice_ftsnr_metrics(
     for z in range(z_dim):
         n_vox = int(slice_voxel_counts[z])
         eligible = z in eligible_indices
-        empty_spike = compute_roi_tr_spike_metrics(np.array([], dtype=np.float64))
-        row: Dict[str, Any] = {
-            "slice_index": int(z),
-            "n_voxels": n_vox,
-            "eligible": bool(eligible),
-            "slice_roi_mean_tr_spike_metrics": empty_spike,
-            "slice_n_tr_abs_robust_z_gt_4": 0,
-            "slice_pct_tr_abs_robust_z_gt_4": 0.0,
-            "slice_max_abs_robust_z": 0.0,
-        }
-        if n_vox > 0:
-            slice_mask = roi_mask[:, :, z]
-            roi_ts = data_4d[:, :, z, :][slice_mask]
-            roi_mean_series = np.mean(roi_ts, axis=0)
-            spike_block = compute_roi_tr_spike_metrics(roi_mean_series)
-            row["slice_roi_mean_tr_spike_metrics"] = spike_block
-            row["slice_n_tr_abs_robust_z_gt_4"] = int(spike_block.get("n_tr_abs_robust_z_gt_4", 0))
-            row["slice_pct_tr_abs_robust_z_gt_4"] = float(spike_block.get("pct_tr_abs_robust_z_gt_4", 0.0))
-            row["slice_max_abs_robust_z"] = float(spike_block.get("max_abs_robust_z", 0.0))
-        per_slice.append(row)
         if eligible:
+            empty_spike = compute_roi_tr_spike_metrics(np.array([], dtype=np.float64))
+            row: Dict[str, Any] = {
+                "slice_index": int(z),
+                "n_voxels": n_vox,
+                "eligible": bool(eligible),
+                "slice_roi_mean_tr_spike_metrics": empty_spike,
+                "slice_n_tr_abs_robust_z_gt_4": 0,
+                "slice_pct_tr_abs_robust_z_gt_4": 0.0,
+                "slice_max_abs_robust_z": 0.0,
+            }
+            if n_vox > 0:
+                slice_mask = roi_mask[:, :, z]
+                roi_ts = data_4d[:, :, z, :][slice_mask]
+                roi_mean_series = np.mean(roi_ts, axis=0)
+                spike_block = compute_roi_tr_spike_metrics(roi_mean_series)
+                row["slice_roi_mean_tr_spike_metrics"] = spike_block
+                row["slice_n_tr_abs_robust_z_gt_4"] = int(spike_block.get("n_tr_abs_robust_z_gt_4", 0))
+                row["slice_pct_tr_abs_robust_z_gt_4"] = float(
+                    spike_block.get("pct_tr_abs_robust_z_gt_4", 0.0)
+                )
+                row["slice_max_abs_robust_z"] = float(spike_block.get("max_abs_robust_z", 0.0))
+            per_slice.append(row)
             eligible_rows.append(row)
 
     if eligible_rows:
@@ -1325,6 +1327,33 @@ def compute_slice_ftsnr_metrics(
         ),
         "per_slice": per_slice,
     }
+
+
+def _spike_metrics_compact_view(spike_block: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact TR-spike metrics without large per-TR arrays.
+    Args:
+        spike_block (Dict[str, Any]): Full spike metrics dictionary.
+    Returns:
+        Dict[str, Any]: Compact spike metrics preserving scalar summaries.
+    """
+    out = dict(spike_block)
+    out.pop("robust_z_per_tr", None)
+    out.pop("roi_mean_signal_per_tr", None)
+    return out
+
+
+def compact_slice_ftsnr_metrics(slice_metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact slice metrics for JSON output.
+    In compact mode, ``per_slice`` is omitted to reduce JSON size; consumers
+    should interpret missing per-slice rows as empty/not-applicable slices.
+    Args:
+        slice_metrics (Dict[str, Any]): Full slice metrics block.
+    Returns:
+        Dict[str, Any]: Compact slice metrics block.
+    """
+    out = dict(slice_metrics)
+    out.pop("per_slice", None)
+    return out
 
 
 def _analysis_roi_mask_for_summary(
@@ -1408,6 +1437,7 @@ def save_outputs(
     brain_mask_override: Optional[np.ndarray] = None,
     slice_min_voxels_floor: int = 50,
     slice_min_voxels_ratio: float = 0.40,
+    compact_json: bool = True,
 ) -> Tuple[Path, Path, List[Path]]:
     """Write map and JSON outputs.
     Args:
@@ -1432,6 +1462,8 @@ def save_outputs(
             recomputing the intensity-based mask.
         slice_min_voxels_floor (int): Slice-level spike eligibility floor.
         slice_min_voxels_ratio (float): Slice-level eligibility ratio of max slice support.
+        compact_json (bool): When True (default), omit high-volume JSON arrays
+            and per-slice details that are not used in summary plotting.
     Returns:
         Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_map_paths)`.
     """
@@ -1448,12 +1480,19 @@ def save_outputs(
         brain_mask_override,
     )
     ft_metrics = compute_ftsnr_metrics(data_4d, analysis_roi_mask)
+    if compact_json:
+        ft_metrics = dict(ft_metrics)
+        roi_spike = ft_metrics.get("roi_mean_tr_spike_metrics")
+        if isinstance(roi_spike, dict):
+            ft_metrics["roi_mean_tr_spike_metrics"] = _spike_metrics_compact_view(roi_spike)
     slice_ft_metrics: Optional[Dict[str, Any]] = compute_slice_ftsnr_metrics(
         data_4d,
         analysis_roi_mask,
         min_voxels_floor=slice_min_voxels_floor,
         min_voxels_ratio=slice_min_voxels_ratio,
     )
+    if compact_json and isinstance(slice_ft_metrics, dict):
+        slice_ft_metrics = compact_slice_ftsnr_metrics(slice_ft_metrics)
 
     output_map_censoring = "full_fov"
     tsnr_save = tsnr_map
@@ -1542,6 +1581,7 @@ def run_analysis(
     mask_maps: bool = True,
     slice_min_voxels_floor: int = 50,
     slice_min_voxels_ratio: float = 0.40,
+    full_json_details: bool = False,
 ) -> Tuple[Path, Path, List[Path]]:
     """Run full tSNR analysis and write outputs.
     Args:
@@ -1574,6 +1614,8 @@ def run_analysis(
             to NaN. Set False for full field-of-view maps.
         slice_min_voxels_floor (int): Slice-level spike eligibility floor.
         slice_min_voxels_ratio (float): Slice-level eligibility ratio of max slice support.
+        full_json_details (bool): When True, retain full per-TR and per-slice JSON
+            arrays. Default False writes compact JSON summaries.
     Returns:
         Tuple[Path, Path, List[Path]]: `(map_path, stats_path, optional_intermediate_paths)`.
     Raises:
@@ -1707,6 +1749,7 @@ def run_analysis(
         brain_mask_override=brain_mask_override,
         slice_min_voxels_floor=slice_min_voxels_floor,
         slice_min_voxels_ratio=slice_min_voxels_ratio,
+        compact_json=not full_json_details,
     )
 
 
@@ -1796,6 +1839,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.40,
         help="Minimum eligible slice support as ratio of max slice ROI support (0,1].",
     )
+    parser.add_argument(
+        "--full-json-details",
+        action="store_true",
+        help="Write full per-TR and per-slice JSON details (default writes compact summaries).",
+    )
     return parser
 
 
@@ -1824,6 +1872,7 @@ def _run_one_analysis_from_cli(args: argparse.Namespace, input_path: Path) -> No
         mask_maps=not args.full_fov_maps,
         slice_min_voxels_floor=args.slice_min_voxels_floor,
         slice_min_voxels_ratio=args.slice_min_voxels_ratio,
+        full_json_details=bool(args.full_json_details),
     )
 
 

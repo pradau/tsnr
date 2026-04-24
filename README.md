@@ -84,6 +84,7 @@ Useful options:
 - `--phantom-full-threshold-fraction`: intensity threshold as a fraction of the local reference for `full_minus_edges` (default `0.35`).
 - `--input-pattern`: when `input` is a directory, override the default `*_bold.nii.gz` / `*_bold.nii` discovery with one glob.
 - `--slice-min-voxels-floor` / `--slice-min-voxels-ratio`: tune z-slice eligibility for `slice_ftsnr_metrics` (defaults: floor **50**, ratio **0.40**).
+- `--full-json-details`: write full per-TR and per-slice JSON details (default output is compact).
 
 ## Inputs
 
@@ -131,9 +132,11 @@ Outliers are flagged with **robust z** using **|z| > 4**:
 
 Typical JSON keys (see your stats file for the exact set): `n_timepoints`, `method_robust_z`, `robust_median`, `mad`, `robust_sigma`, `n_tr_abs_robust_z_gt_4`, `pct_tr_abs_robust_z_gt_4`, `max_abs_robust_z`.
 
-- **`robust_z_per_tr`:** list of **signed** robust z-scores, one entry per TR (same order as the ROI-mean series after `timepoint_selection`). Length matches `n_timepoints` when the series is valid and has at least two points; degenerate cases may yield an empty list or a single value. Used for scalar spike summaries and echo-level plots; **re-run `tsnr.py` in `brain` mode** to refresh if missing.
+By default, stats JSON is compact and keeps scalar summaries used by QA plots. High-volume arrays are omitted unless you run `tsnr.py` with `--full-json-details`.
 
-- **`roi_mean_signal_per_tr`:** ROI-mean signal value per TR (same order and length as `robust_z_per_tr` when present). Stored so **TR-index figures** can apply a **linear detrend** before robust z without changing any other reported statistics. Omitted in older JSON; refresh with current `tsnr.py`.
+- **`robust_z_per_tr`:** list of **signed** robust z-scores, one entry per TR (same order as the ROI-mean series after `timepoint_selection`). Length matches `n_timepoints` when the series is valid and has at least two points; degenerate cases may yield an empty list or a single value. This is written only with `--full-json-details`.
+
+- **`roi_mean_signal_per_tr`:** ROI-mean signal value per TR (same order and length as `robust_z_per_tr` when present). Stored so **TR-index figures** can apply a **linear detrend** before robust z without changing any other reported statistics. This is written only with `--full-json-details`.
 
 High counts or large `max_abs_*` values point to TRs with unusually high or low whole-ROI signal relative to the rest of the run (for example motion spikes, acquisition glitches, or extreme signal dropouts).
 
@@ -142,7 +145,7 @@ High counts or large `max_abs_*` values point to TRs with unusually high or low 
 This block flags slices with **large |robust z|** events on the **slice ROI-mean time course** (same voxels and **same `timepoint_selection`** as the rest of the run). Whole-brain `ftsnr` can miss slice-local dropout.
 
 - Axis is fixed to `z` (slice direction of the internal `(x, y, z, t)` array).
-- For each slice with ROI voxels, the tool computes `slice_roi_mean_tr_spike_metrics` (same robust-z machinery as **ROI mean TR spike metrics**, applied to that slice’s ROI-mean series). It also stores flat helpers aligned with the TR-level **|z| > 4** rule:
+- For each **eligible** slice, the tool computes `slice_roi_mean_tr_spike_metrics` (same robust-z machinery as **ROI mean TR spike metrics**, applied to that slice’s ROI-mean series). It also stores flat helpers aligned with the TR-level **|z| > 4** rule:
   - `slice_n_tr_abs_robust_z_gt_4`, `slice_pct_tr_abs_robust_z_gt_4`: count and **percentage** of TRs with **|robust z| > 4** on that slice's ROI-mean series.
   - `slice_max_abs_robust_z`: maximum **|robust z|** across TRs on that slice.
 - Eligibility avoids thin edge slices:
@@ -157,7 +160,7 @@ Top-level fields in `slice_ftsnr_metrics` include:
 - `worst_slice_spike_pct_slice_index`, `worst_slice_spike_pct_tr_abs_robust_z_gt_4` (eligible slice with highest `%` TRs with **|z|>4**; tie-break by higher `slice_max_abs_robust_z`)
 - `worst_slice_spike_max_abs_slice_index`, `worst_slice_spike_max_abs_robust_z` (eligible slice with largest `slice_max_abs_robust_z`)
 - `same_slice_for_both_spike_flags`
-- `per_slice`: one row per z-slice with `slice_index`, `n_voxels`, `eligible`, the flat spike helpers above, and `slice_roi_mean_tr_spike_metrics`
+- `per_slice`: one row per **eligible** z-slice with `slice_index`, `n_voxels`, `eligible`, the flat spike helpers above, and `slice_roi_mean_tr_spike_metrics`. In compact JSON (default), `per_slice` is omitted; treat omitted rows as empty/not-applicable (`n_voxels=0`, `eligible=false`, spike counts `0`).
 
 **Whole-ROI vs slice spike sensitivity:** ROI-mean TR spikes use one time series: the mean over **all** in-mask voxels each TR. Slice metrics use, per *z*, the mean over **that slice only**. A slab-local dropout changes almost every voxel contributing to that slice mean, but the same event is diluted when averaged with unaffected slices in the whole-brain ROI mean. Robust *z* also uses median/MAD **of the series being scored**, so slice-local series can show much larger |z| for the same physical artifact. The default `plot_tsnr_stats.py` report therefore emphasizes slice summaries; whole-ROI spike panels are optional (see **Plotting**).
 

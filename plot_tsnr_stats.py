@@ -269,39 +269,37 @@ def load_metric_rows(stats_paths: Sequence[Path]) -> List[Dict[str, object]]:
             spike_block = payload.get("roi_mean_tr_spike_metrics")
             if isinstance(spike_block, dict):
                 missing = [k for k in SPIKE_METRICS if spike_block.get(k) is None]
-                if missing:
-                    raise ValueError(
-                        f"roi_mean_tr_spike_metrics missing keys {missing} in {stats_path}"
-                    )
-                for key in SPIKE_METRICS:
-                    fv = float(spike_block[key])
-                    if not math.isfinite(fv):
-                        raise ValueError(f"Non-finite spike metric {key} in {stats_path}")
-                    row[key] = fv
-                row["has_spike_metrics"] = True
+                if not missing:
+                    for key in SPIKE_METRICS:
+                        fv = float(spike_block[key])
+                        if not math.isfinite(fv):
+                            raise ValueError(f"Non-finite spike metric {key} in {stats_path}")
+                        row[key] = fv
+                    row["has_spike_metrics"] = True
+                else:
+                    row["has_spike_metrics"] = False
             else:
                 row["has_spike_metrics"] = False
             slice_block = payload.get("slice_ftsnr_metrics")
             if isinstance(slice_block, dict):
                 missing_slice_keys = [k for k in SLICE_METRICS if slice_block.get(k) is None]
-                if missing_slice_keys:
-                    raise ValueError(
-                        f"slice_ftsnr_metrics missing keys {missing_slice_keys} in {stats_path}"
-                    )
-                for key in SLICE_METRICS:
-                    fv = float(slice_block[key])
-                    if not math.isfinite(fv):
-                        raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
-                    row[key] = fv
-                for key, value in slice_block.items():
-                    if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
-                        continue
-                    if isinstance(value, (int, float)):
-                        fv = float(value)
+                if not missing_slice_keys:
+                    for key in SLICE_METRICS:
+                        fv = float(slice_block[key])
                         if not math.isfinite(fv):
                             raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
                         row[key] = fv
-                row["has_slice_metrics"] = True
+                    for key, value in slice_block.items():
+                        if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
+                            continue
+                        if isinstance(value, (int, float)):
+                            fv = float(value)
+                            if not math.isfinite(fv):
+                                raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                            row[key] = fv
+                    row["has_slice_metrics"] = True
+                else:
+                    row["has_slice_metrics"] = False
             else:
                 row["has_slice_metrics"] = False
             rows.append(row)
@@ -354,45 +352,122 @@ def load_phantom_metric_rows(
             spike_block = payload.get("roi_mean_tr_spike_metrics")
             if isinstance(spike_block, dict):
                 missing = [k for k in SPIKE_METRICS if spike_block.get(k) is None]
-                if missing:
-                    raise ValueError(
-                        f"roi_mean_tr_spike_metrics missing keys {missing} in {stats_path}"
-                    )
-                for key in SPIKE_METRICS:
-                    fv = float(spike_block[key])
-                    if not math.isfinite(fv):
-                        raise ValueError(f"Non-finite spike metric {key} in {stats_path}")
-                    row[key] = fv
-                row["has_spike_metrics"] = True
+                if not missing:
+                    for key in SPIKE_METRICS:
+                        fv = float(spike_block[key])
+                        if not math.isfinite(fv):
+                            raise ValueError(f"Non-finite spike metric {key} in {stats_path}")
+                        row[key] = fv
+                    row["has_spike_metrics"] = True
+                else:
+                    row["has_spike_metrics"] = False
             else:
                 row["has_spike_metrics"] = False
             slice_block = payload.get("slice_ftsnr_metrics")
             if isinstance(slice_block, dict):
                 missing_slice_keys = [k for k in SLICE_METRICS if slice_block.get(k) is None]
-                if missing_slice_keys:
-                    raise ValueError(
-                        f"slice_ftsnr_metrics missing keys {missing_slice_keys} in {stats_path}"
-                    )
-                for key in SLICE_METRICS:
-                    fv = float(slice_block[key])
-                    if not math.isfinite(fv):
-                        raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
-                    row[key] = fv
-                for key, value in slice_block.items():
-                    if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
-                        continue
-                    if isinstance(value, (int, float)):
-                        fv = float(value)
+                if not missing_slice_keys:
+                    for key in SLICE_METRICS:
+                        fv = float(slice_block[key])
                         if not math.isfinite(fv):
                             raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
                         row[key] = fv
-                row["has_slice_metrics"] = True
+                    for key, value in slice_block.items():
+                        if key in SLICE_METRICS or key in SLICE_NON_SCALAR_KEYS or isinstance(value, bool):
+                            continue
+                        if isinstance(value, (int, float)):
+                            fv = float(value)
+                            if not math.isfinite(fv):
+                                raise ValueError(f"Non-finite slice metric {key} in {stats_path}")
+                            row[key] = fv
+                    row["has_slice_metrics"] = True
+                else:
+                    row["has_slice_metrics"] = False
             else:
                 row["has_slice_metrics"] = False
             rows.append(row)
         except (ValueError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             print(f"Warning: skipping {stats_path}: {exc}")
     return rows
+
+
+def _raise_if_mixed_slice_metrics(rows: Sequence[Dict[str, object]]) -> None:
+    """Fail fast when some stats JSON include slice summaries and others do not.
+
+    Uniform absence (no runs have slice metrics) is allowed. Uniform presence is allowed.
+    Mixed schemas make slice panels ambiguous; callers should recompute derivatives.
+
+    Args:
+        rows (Sequence[Dict[str, object]]): Loaded rows from ``load_metric_rows`` /
+            ``load_phantom_metric_rows``.
+
+    Raises:
+        ValueError: If any but not all rows have ``has_slice_metrics``.
+    """
+    with_slice = [str(r["stats_path"]) for r in rows if r.get("has_slice_metrics")]
+    without = [str(r["stats_path"]) for r in rows if not r.get("has_slice_metrics")]
+    if not with_slice or not without:
+        return
+    n_show = 8
+    msg = (
+        "Mixed slice_ftsnr_metrics schema in this report scope: some *_tsnr_stats.json files "
+        f"include complete worst-slice summaries ({len(with_slice)} file(s)), others do not "
+        f"({len(without)} file(s)). Slice panels and slice CSV rows require every run to "
+        "include slice_ftsnr_metrics with non-null worst_slice_spike_pct_tr_abs_robust_z_gt_4 and "
+        "worst_slice_spike_max_abs_robust_z.\n"
+        "Examples with complete slice metrics:\n"
+    )
+    for p in with_slice[:n_show]:
+        msg += f"  - {p}\n"
+    if len(with_slice) > n_show:
+        msg += f"  - ... and {len(with_slice) - n_show} more\n"
+    msg += "Examples missing those fields:\n"
+    for p in without[:n_show]:
+        msg += f"  - {p}\n"
+    if len(without) > n_show:
+        msg += f"  - ... and {len(without) - n_show} more\n"
+    msg += (
+        "Fix: regenerate all BOLD stats for this scope with one tSNR version, for example:\n"
+        "  uv run tsnr.py /path/to/sub-<label>/ses-<label>/func brain"
+    )
+    raise ValueError(msg.strip())
+
+
+def _raise_if_mixed_spike_metrics(rows: Sequence[Dict[str, object]]) -> None:
+    """Fail fast when ROI spike summaries are present on some runs only (``--spike-metrics-panels``).
+
+    Args:
+        rows (Sequence[Dict[str, object]]): Loaded metric rows.
+
+    Raises:
+        ValueError: If any but not all rows have ``has_spike_metrics``.
+    """
+    with_spike = [str(r["stats_path"]) for r in rows if r.get("has_spike_metrics")]
+    without = [str(r["stats_path"]) for r in rows if not r.get("has_spike_metrics")]
+    if not with_spike or not without:
+        return
+    n_show = 8
+    msg = (
+        "Mixed roi_mean_tr_spike_metrics schema in this report scope: some files have full "
+        f"TR spike summaries ({len(with_spike)} file(s)), others do not ({len(without)} file(s)). "
+        "Spike panels require max_abs_robust_z, pct_tr_abs_robust_z_gt_4, and "
+        "n_tr_abs_robust_z_gt_4 on every run.\n"
+        "Examples with complete spike metrics:\n"
+    )
+    for p in with_spike[:n_show]:
+        msg += f"  - {p}\n"
+    if len(with_spike) > n_show:
+        msg += f"  - ... and {len(with_spike) - n_show} more\n"
+    msg += "Examples missing those fields:\n"
+    for p in without[:n_show]:
+        msg += f"  - {p}\n"
+    if len(without) > n_show:
+        msg += f"  - ... and {len(without) - n_show} more\n"
+    msg += (
+        "Fix: regenerate all BOLD stats for this scope with one tSNR version, for example:\n"
+        "  uv run tsnr.py /path/to/sub-<label>/ses-<label>/func brain"
+    )
+    raise ValueError(msg.strip())
 
 
 def filter_rows(
@@ -993,6 +1068,37 @@ def roi_mean_signal_series_from_spike_block(spike: object) -> Optional[List[floa
         return None
 
 
+def per_slice_metrics_row_or_empty(slice_metrics: object, slice_index: int) -> Dict[str, object]:
+    """Return one per-slice row, defaulting to an empty row when missing.
+    Missing rows are treated as empty/not-applicable slices for backward
+    compatibility with compact stats JSON output.
+    Args:
+        slice_metrics (object): ``slice_ftsnr_metrics`` object from stats JSON.
+        slice_index (int): Z slice index to query.
+    Returns:
+        Dict[str, object]: Existing row or an empty-equivalent default row.
+    """
+    empty: Dict[str, object] = {
+        "slice_index": int(slice_index),
+        "n_voxels": 0,
+        "eligible": False,
+        "slice_n_tr_abs_robust_z_gt_4": 0,
+        "slice_pct_tr_abs_robust_z_gt_4": 0.0,
+        "slice_max_abs_robust_z": 0.0,
+    }
+    if not isinstance(slice_metrics, dict):
+        return empty
+    rows = slice_metrics.get("per_slice")
+    if not isinstance(rows, list):
+        return empty
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if int(row.get("slice_index", -1)) == int(slice_index):
+            return row
+    return empty
+
+
 def tr_plot_z_from_spike_block(spike: object) -> Optional[List[float]]:
     """Z series for the TR-index grid: detrended from ``roi_mean_signal_per_tr`` when present.
     Args:
@@ -1241,6 +1347,10 @@ def run_report(
             f"for filters subject={subject!r}, session={session!r}"
         )
 
+    _raise_if_mixed_slice_metrics(rows)
+    if spike_metrics_panels:
+        _raise_if_mixed_spike_metrics(rows)
+
     generated: List[Path] = []
     aggregated_by_metric: Dict[str, Sequence[Dict[str, object]]] = {}
     for metric in METRICS:
@@ -1291,8 +1401,8 @@ def run_report(
         csv_metric_names.extend(SPIKE_METRICS)
     elif spike_metrics_panels and not has_all_spikes:
         print(
-            "Warning: skipping spike metric plots and CSV rows (not every stats JSON "
-            "includes roi_mean_tr_spike_metrics with all required keys)."
+            "Warning: skipping spike metric plots and CSV rows (no stats JSON includes "
+            "roi_mean_tr_spike_metrics with all required keys for every run in this scope)."
         )
     if has_all_slice_metrics:
         for metric in SLICE_METRICS + SLICE_INDEX_METRICS:
@@ -1315,11 +1425,6 @@ def run_report(
         )
         generated.append(slice_path)
         csv_metric_names.extend(SLICE_METRICS + SLICE_INDEX_METRICS)
-    else:
-        print(
-            "Warning: skipping slice metric plots and CSV rows (not every stats JSON "
-            "includes slice_ftsnr_metrics with all required keys)."
-        )
 
     csv_path = out_dir / "aggregated_metric_summary.csv"
     csv_rows = _tidy_csv_rows(

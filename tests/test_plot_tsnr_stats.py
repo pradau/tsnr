@@ -36,12 +36,15 @@ from plot_tsnr_stats import (
     filter_rows,
     load_metric_rows,
     parse_bids_entities_from_name,
+    per_slice_metrics_row_or_empty,
     plot_roi_mean_signal_tr_session_grid,
     plot_robust_z_tr_session_grid,
     roi_mean_signal_series_from_spike_block,
     run_report,
     resolve_phantom_session_label,
     tr_plot_z_from_spike_block,
+    _raise_if_mixed_slice_metrics,
+    _raise_if_mixed_spike_metrics,
 )
 
 
@@ -57,6 +60,7 @@ def _write_stats(
     n_tr_abs_robust_z_gt_4: float = 0.0,
     robust_z_len: int = 12,
     include_slice_metrics: bool = True,
+    include_tr_series: bool = True,
     worst_slice_spike_pct_tr_abs_robust_z_gt_4: float = 12.5,
     worst_slice_spike_max_abs_robust_z: float = 6.2,
     worst_slice_spike_pct_slice_index: int = 4,
@@ -77,18 +81,20 @@ def _write_stats(
     Returns:
         None: This function returns nothing.
     """
+    spike_payload: Dict[str, object] = {
+        "max_abs_robust_z": max_abs_robust_z,
+        "pct_tr_abs_robust_z_gt_4": pct_tr_abs_robust_z_gt_4,
+        "n_tr_abs_robust_z_gt_4": n_tr_abs_robust_z_gt_4,
+    }
+    if include_tr_series:
+        spike_payload["robust_z_per_tr"] = [0.1 * float(i % 5) for i in range(robust_z_len)]
+        spike_payload["roi_mean_signal_per_tr"] = [1000.0 + 0.5 * float(i) for i in range(robust_z_len)]
     payload: Dict[str, object] = {
         "tsnr_mean": tsnr_mean,
         "tsnr_std": tsnr_std,
         "ftsnr": ftsnr,
         "roi_mean_signal_std": roi_std,
-        "roi_mean_tr_spike_metrics": {
-            "max_abs_robust_z": max_abs_robust_z,
-            "pct_tr_abs_robust_z_gt_4": pct_tr_abs_robust_z_gt_4,
-            "n_tr_abs_robust_z_gt_4": n_tr_abs_robust_z_gt_4,
-            "robust_z_per_tr": [0.1 * float(i % 5) for i in range(robust_z_len)],
-            "roi_mean_signal_per_tr": [1000.0 + 0.5 * float(i) for i in range(robust_z_len)],
-        },
+        "roi_mean_tr_spike_metrics": spike_payload,
     }
     if include_slice_metrics:
         payload["slice_ftsnr_metrics"] = {
@@ -206,6 +212,70 @@ def test_discover_load_and_aggregate(tmp_path: Path) -> None:
     assert float(ses1a_echo1["tsnr_mean_error"]) > 0.0
 
 
+def test_load_metric_rows_incomplete_spike_block_still_loads(tmp_path: Path) -> None:
+    """Partial roi_mean_tr_spike_metrics (legacy schema) still yields core metric rows."""
+    root = tmp_path / "bids"
+    path = root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-1_bold_tsnr_stats.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, object] = {
+        "tsnr_mean": 80.0,
+        "tsnr_std": 10.0,
+        "ftsnr": 120.0,
+        "roi_mean_signal_std": 0.85,
+        "roi_mean_tr_spike_metrics": {"max_abs_robust_z": 2.0},
+        "slice_ftsnr_metrics": {
+            "worst_slice_spike_pct_tr_abs_robust_z_gt_4": 1.0,
+            "worst_slice_spike_max_abs_robust_z": 3.0,
+            "worst_slice_spike_pct_slice_index": 0,
+            "worst_slice_spike_max_abs_slice_index": 1,
+            "n_slices_with_roi": 10,
+            "n_slices_eligible": 8,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    rows = load_metric_rows([path])
+    assert len(rows) == 1
+    assert rows[0]["has_spike_metrics"] is False
+    assert rows[0]["has_slice_metrics"] is True
+
+
+def test_load_metric_rows_incomplete_slice_block_still_loads(tmp_path: Path) -> None:
+    """slice_ftsnr_metrics present but missing current worst-slice scalars still loads."""
+    root = tmp_path / "bids"
+    path = root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-1_bold_tsnr_stats.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, object] = {
+        "tsnr_mean": 80.0,
+        "tsnr_std": 10.0,
+        "ftsnr": 120.0,
+        "roi_mean_signal_std": 0.85,
+        "slice_ftsnr_metrics": {
+            "worst_slice_spike_pct_tr_abs_robust_z_gt_4": None,
+            "worst_slice_spike_max_abs_robust_z": None,
+            "worst_slice_spike_pct_slice_index": 0,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    rows = load_metric_rows([path])
+    assert len(rows) == 1
+    assert rows[0]["has_slice_metrics"] is False
+
+
+def test_per_slice_metrics_row_or_empty_handles_compact_schema() -> None:
+    """Missing per_slice in compact JSON is interpreted as empty slice metrics."""
+    slice_metrics: Dict[str, object] = {
+        "axis": "z",
+        "n_slices_total": 5,
+        "n_slices_with_roi": 3,
+        "n_slices_eligible": 2,
+    }
+    row = per_slice_metrics_row_or_empty(slice_metrics, slice_index=3)
+    assert row["slice_index"] == 3
+    assert row["n_voxels"] == 0
+    assert row["eligible"] is False
+    assert row["slice_n_tr_abs_robust_z_gt_4"] == 0
+
+
 def test_filter_rows_subject_and_session(tmp_path: Path) -> None:
     """Subject and session filters keep expected runs only."""
     root = _make_dataset(tmp_path)
@@ -251,6 +321,36 @@ def test_run_report_spike_metrics_panels_opt_in(tmp_path: Path) -> None:
     assert (out_dir / "spike_metrics_panel_by_echo_ci95.png").exists()
     text = (out_dir / "aggregated_metric_summary.csv").read_text(encoding="utf-8")
     assert any(line.startswith("max_abs_robust_z,") for line in text.splitlines()[1:])
+
+
+def test_run_report_spike_metrics_panels_work_with_compact_spike_json(tmp_path: Path) -> None:
+    """Spike panels work when per-TR arrays are omitted from JSON."""
+    root = tmp_path / "bids"
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-1_bold_tsnr_stats.json",
+        80.0,
+        10.0,
+        120.0,
+        0.85,
+        include_tr_series=False,
+    )
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-2_bold_tsnr_stats.json",
+        70.0,
+        11.0,
+        110.0,
+        0.90,
+        include_tr_series=False,
+    )
+    out_dir = tmp_path / "reports" / "spike_compact"
+    generated = run_report(
+        root,
+        out_dir=out_dir,
+        error_mode="sem",
+        group_by_task=False,
+        spike_metrics_panels=True,
+    )
+    assert out_dir / "spike_metrics_panel_by_echo_sem.png" in generated
 
 
 def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
@@ -319,6 +419,49 @@ def test_run_report_filters_for_task_curves(tmp_path: Path) -> None:
     assert "worst_slice_spike_max_abs_slice_index,sub-3334,ses-1a,echo-1,task-laluna," in text
     assert (out_dir / "spike_metrics_panel_by_echo_sem.png").exists() is False
     assert (out_dir / "slice_metrics_panel_by_echo_sem.png").exists()
+
+
+def test_run_report_raises_on_mixed_slice_metrics(tmp_path: Path) -> None:
+    """Inconsistent slice_ftsnr_metrics across runs aborts with a helpful error."""
+    root = tmp_path / "bids"
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-1_bold_tsnr_stats.json",
+        80.0,
+        10.0,
+        120.0,
+        0.85,
+        include_slice_metrics=True,
+    )
+    _write_stats(
+        root / "sub-01/ses-1a/derivatives/tsnr/sub-01_ses-1a_task-rest_echo-2_bold_tsnr_stats.json",
+        70.0,
+        11.0,
+        110.0,
+        0.90,
+        include_slice_metrics=False,
+    )
+    out_dir = tmp_path / "reports" / "tsnr_plots"
+    with pytest.raises(ValueError, match="Mixed slice_ftsnr_metrics"):
+        run_report(root, out_dir=out_dir, error_mode="sem", group_by_task=False)
+
+
+def test_raise_if_mixed_spike_metrics_detects_partial_schema() -> None:
+    """Spike panel scope errors when only some runs have full roi_mean_tr_spike_metrics."""
+    rows = [
+        {"stats_path": "/a/x.json", "has_spike_metrics": True},
+        {"stats_path": "/b/y.json", "has_spike_metrics": False},
+    ]
+    with pytest.raises(ValueError, match="Mixed roi_mean_tr_spike_metrics"):
+        _raise_if_mixed_spike_metrics(rows)
+
+
+def test_raise_if_mixed_slice_metrics_allows_uniform_absence() -> None:
+    """All runs lacking slice summaries does not trigger mixed-schema error."""
+    rows = [
+        {"stats_path": "/a/x.json", "has_slice_metrics": False},
+        {"stats_path": "/b/y.json", "has_slice_metrics": False},
+    ]
+    _raise_if_mixed_slice_metrics(rows)
 
 
 def test_run_report_skips_slice_plots_when_missing_slice_metrics(tmp_path: Path) -> None:

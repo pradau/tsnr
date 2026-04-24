@@ -521,7 +521,7 @@ def test_compute_slice_ftsnr_metrics_excludes_low_support_slices() -> None:
     assert out["n_slices_eligible"] == 2
     assert out["eligibility_rule"]["computed_min_voxels_threshold"] == 50
     per = {int(row["slice_index"]): row for row in out["per_slice"]}
-    assert bool(per[0]["eligible"]) is False
+    assert 0 not in per
     assert bool(per[2]["eligible"]) is True
     assert bool(per[3]["eligible"]) is True
 
@@ -545,6 +545,7 @@ def test_brain_slice_ftsnr_metrics_flags_corrupted_slice(tmp_path: Path) -> None
         first_timepoint=0,
         slice_min_voxels_floor=25,
         slice_min_voxels_ratio=0.20,
+        full_json_details=True,
     )
     stats = load_stats(stats_path)
     assert "slice_ftsnr_metrics" in stats
@@ -559,6 +560,43 @@ def test_brain_slice_ftsnr_metrics_flags_corrupted_slice(tmp_path: Path) -> None
         per_slice[1]["slice_pct_tr_abs_robust_z_gt_4"]
     )
     assert float(per_slice[2]["slice_max_abs_robust_z"]) > float(per_slice[1]["slice_max_abs_robust_z"])
+
+
+def test_compact_json_default_omits_per_tr_and_per_slice_details(tmp_path: Path) -> None:
+    """Default JSON output is compact and omits large detail arrays."""
+    data = make_phantom_data((11, 11, 5, 10))
+    input_path = tmp_path / "compact_default.nii.gz"
+    write_nifti(input_path, data)
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        roi_size=11,
+        first_timepoint=0,
+    )
+    stats = load_stats(stats_path)
+    spikes = stats["roi_mean_tr_spike_metrics"]
+    assert "robust_z_per_tr" not in spikes
+    assert "roi_mean_signal_per_tr" not in spikes
+    assert "per_slice" not in stats["slice_ftsnr_metrics"]
+
+
+def test_full_json_details_keeps_per_tr_and_per_slice_details(tmp_path: Path) -> None:
+    """--full-json-details contract retains detailed arrays for debug panels."""
+    data = make_phantom_data((11, 11, 5, 10))
+    input_path = tmp_path / "full_details.nii.gz"
+    write_nifti(input_path, data)
+    _, stats_path, _ = run_analysis(
+        input_path=input_path,
+        mode="phantom",
+        roi_size=11,
+        first_timepoint=0,
+        full_json_details=True,
+    )
+    stats = load_stats(stats_path)
+    spikes = stats["roi_mean_tr_spike_metrics"]
+    assert isinstance(spikes.get("robust_z_per_tr"), list)
+    assert isinstance(spikes.get("roi_mean_signal_per_tr"), list)
+    assert isinstance(stats["slice_ftsnr_metrics"].get("per_slice"), list)
 
 
 def test_zero_std_handling_maps_to_zero(tmp_path: Path) -> None:
