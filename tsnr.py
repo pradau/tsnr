@@ -35,11 +35,32 @@ ROBUST_Z_SPIKE_ABS_THRESHOLD: float = 4.0
 
 
 def fsl_dir() -> Path:
-    """Return FSL installation root from ``FSLDIR`` or a default path.
+    """Return FSL installation root from ``FSLDIR``.
     Returns:
         Path: Directory containing FSL (must include ``etc/fslconf/fsl.sh``).
+    Raises:
+        ValueError: If ``FSLDIR`` is not set.
     """
-    return Path(os.environ.get("FSLDIR", "/Users/pradau/fsl"))
+    fsldir = os.environ.get("FSLDIR")
+    if fsldir is None or not fsldir.strip():
+        raise ValueError("FSLDIR is not set; set FSLDIR to your FSL installation root")
+    return Path(fsldir)
+
+
+def serialize_input_file_for_stats(input_path: Path) -> str:
+    """Return a portable ``input_file`` value for stats JSON.
+    Uses a path relative to the current working directory when possible;
+    otherwise falls back to basename to avoid machine-specific absolute paths.
+    Args:
+        input_path (Path): Source input file.
+    Returns:
+        str: Relative or basename path for stats metadata.
+    """
+    resolved = input_path.resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return input_path.name
 
 
 def _bids_json_sidecar_for_nifti(nifti_path: Path) -> Path:
@@ -1542,7 +1563,7 @@ def save_outputs(
         nib.save(std_img, str(tstd_path))
         optional_paths = [tmean_path, tstd_path]
     payload: Dict[str, Any] = {
-        "input_file": str(input_path),
+        "input_file": serialize_input_file_for_stats(input_path),
         "input_type": input_type,
         "mode": mode,
         "n_timepoints": int(data_4d.shape[3]),
@@ -1711,8 +1732,7 @@ def run_analysis(
                 except (OSError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as exc:
                     brain_mask_override = None
                     print(
-                        "WARNING: No T1w found in anat/ (or BET pipeline failed) "
-                        "— falling back to non-T1 brain masking",
+                        "WARNING: T1 BET/registration pipeline failed — falling back to non-T1 brain masking",
                         file=sys.stderr,
                     )
                     selected_values, parameters = extract_brain_tsnr(

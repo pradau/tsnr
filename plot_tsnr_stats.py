@@ -2,7 +2,7 @@
 # Date: 2026-04-20
 # Build comparison plots for tSNR/fTSNR metrics across BIDS sessions and echoes.
 # Dependencies: Python 3.10+, matplotlib, numpy
-# Usage: uv run plot_tsnr_stats.py --bids-root /Users/pradau/Data/bids-perry
+# Usage: uv run plot_tsnr_stats.py --bids-root /path/to/bids
 
 """
 Plot tSNR-derived statistics from existing derivatives JSON outputs.

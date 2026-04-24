@@ -29,7 +29,7 @@ Default brain masking uses T1 BET plus registration when a `*T1w.nii*` is availa
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/)
-- **Brain mode (T1 mask):** [FSL](https://fsl.fmrib.ox.ac.uk/fsl) on the host, with `FSLDIR` set (or install at the default path used by the script). If FSL is missing or the T1 pipeline fails, analysis falls back to the intensity-based mask; see `parameters.brain_masking` in the stats JSON.
+- **Brain mode (T1 mask):** [FSL](https://fsl.fmrib.ox.ac.uk/fsl) on the host, with `FSLDIR` set to the FSL installation root. If FSL is missing or the T1 pipeline fails, analysis falls back to the intensity-based mask; see `parameters.brain_masking` in the stats JSON.
 
 ## Setup
 
@@ -113,6 +113,7 @@ Basename rules:
 ### Stats JSON (common fields)
 
 - Input metadata: `input_file`, `input_type`, `mode`
+  - `input_file` is written as a path relative to the current working directory when possible; otherwise basename-only.
 - Shape and time: `volume_shape`, `n_timepoints`, `timepoint_selection`
 - Summary: `tsnr_mean`, `tsnr_median`, `tsnr_std`, `tsnr_min`, `tsnr_max`, `ftsnr`, `roi_mean_signal_std`, `n_voxels_in_roi`
   - `tsnr_std` is the spatial standard deviation of per-voxel tSNR across the ROI.
@@ -260,7 +261,7 @@ Filenames tagged **`BAD`** versus **`GOOD`** indicate whether the acquisition sh
 
 Gitignored **`data/`** remains available for unrelated local scratch files.
 
-The installable package wheel still contains only `tsnr.py` (see `pyproject.toml`). The plotting scripts `plot_tsnr_stats.py` and `plot_robust_z_tr_all_sessions.py` live in the repository root; run them with `uv run` from this directory.
+The installable package exposes console scripts `tsnr`, `plot-tsnr-stats`, and `plot-robust-z-tr-all-sessions` (see `pyproject.toml`). You can also run the repository scripts directly with `uv run` from this directory.
 
 ## Plotting tSNR, fTSNR, and ROI variability
 
@@ -309,7 +310,7 @@ Example for one subject and session (defaults: split tasks, no error bars on PNG
 
 ```bash
 uv run plot_tsnr_stats.py \
-  --bids-root /Users/pradau/Data/bids-perry \
+  --bids-root /path/to/bids \
   --subject sub-3334 \
   --session ses-1a \
   --out-dir reports/tsnr_plots_sub-3334_ses-1a

@@ -2,7 +2,7 @@
 # Date: 2026-04-20
 # Batch-generate robust z vs TR index grids for every subject/session in a BIDS tree.
 # Dependencies: Python 3.10+, matplotlib, numpy (same as plot_tsnr_stats.py)
-# Usage: uv run plot_robust_z_tr_all_sessions.py --bids-root /Users/pradau/Data/bids-perry
+# Usage: uv run plot_robust_z_tr_all_sessions.py --bids-root /path/to/bids
 
 """Emit one multi-panel robust-z-vs-TR figure per subject/session (all BOLD stats files)."""
 
@@ -100,7 +100,6 @@ def _parse_args() -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed arguments.
     """
-    default_root = Path("/Users/pradau/Data/bids-perry")
     parser = argparse.ArgumentParser(
         description=(
             "Write robust_z_vs_tr_<sub>_<ses>.png for each subject/session that has "
@@ -110,8 +109,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bids-root",
         type=Path,
-        default=default_root,
-        help=f"BIDS dataset root (default: {default_root})",
+        required=True,
+        help="BIDS dataset root (required).",
     )
     parser.add_argument(
         "--out-dir",

@@ -25,5 +25,6 @@ output/
 reports/
 
 # Local notes/spec variants not for tracking
+Guidelines for tsnr metrics.txt
 New_comparison.md
 Spec*.md

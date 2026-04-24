@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tsnr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Compute fMRI tSNR maps and QA summaries for phantom and brain workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,7 +16,12 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["tsnr.py"]
+only-include = ["tsnr.py", "plot_tsnr_stats.py", "plot_robust_z_tr_all_sessions.py"]
+
+[project.scripts]
+tsnr = "tsnr:cli"
+plot-tsnr-stats = "plot_tsnr_stats:cli"
+plot-robust-z-tr-all-sessions = "plot_robust_z_tr_all_sessions:main"
 
 [dependency-groups]
 dev = [
