@@ -10,7 +10,7 @@ Do not confuse with **`brain_regression/`**, which is gitignored (local-only bra
 |------|----------|
 | `inputs/` | fMRIQA-style phantom cache `*.npz` files |
 | `derivatives_patch/` | Stats and tSNR maps from **`--phantom-roi-mode patch`** (fixed square ROI) |
-| `reports_patch/` | PNG and CSV from **`plot_tsnr_stats.py --phantom-stats-dir derivatives_patch`** |
+| `reports_patch/` | PNG and CSV from **`plot_tsnr_stats.py --stats-dir derivatives_patch`** |
 | `derivatives_full_minus_edges/` | Stats and maps from **`--phantom-roi-mode full_minus_edges`** |
 | `reports_full_minus_edges/` | Reports for that derivatives folder |
 | `exports_nifti/` | Optional 4D NIfTI exports of the same phantom sessions |

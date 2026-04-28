@@ -276,7 +276,7 @@ uv run plot_tsnr_stats.py --bids-root /path/to/bids
 For phantom QA datasets that are **not** in BIDS, point the plotter directly at the stats folder:
 
 ```bash
-uv run plot_tsnr_stats.py --phantom-stats-dir /path/to/dataset/derivatives/tsnr
+uv run plot_tsnr_stats.py --stats-dir /path/to/dataset/derivatives/tsnr
 ```
 
 In phantom mode, the x-axis uses QA session labels (date-style labels) instead of BIDS `echo-*`. Session labels are resolved as:
@@ -295,7 +295,7 @@ Default output path in phantom mode is dataset-local:
 Useful options:
 
 - `--out-dir`: output directory for plots and CSV (default: `reports/tsnr_plots`)
-- `--phantom-stats-dir`: non-BIDS phantom stats input directory (`*_tsnr_stats.json`), compared across QA sessions
+- `--stats-dir`: non-BIDS stats input directory (`*_tsnr_stats.json`), compared across QA sessions
 - `--label-by {auto,metadata_date,filename_date}`: phantom QA session label source
 - `--error-bar {sd,sem,ci95}`: spread used for CSV `error` column and for panel y error bars when error bars are shown (default: `sem`)
 - `--subject sub-XXXX` and `--session ses-X`: optional filters

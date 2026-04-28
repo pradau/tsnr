@@ -101,8 +101,8 @@ def discover_stats_files(bids_root: Path) -> List[Path]:
     return [p for p in paths if p.is_file()]
 
 
-def discover_phantom_stats_files(stats_dir: Path) -> List[Path]:
-    """Find phantom stats JSON files in one directory (non-recursive).
+def discover_non_bids_stats_files(stats_dir: Path) -> List[Path]:
+    """Find non-BIDS stats JSON files in one directory (non-recursive).
     Args:
         stats_dir (Path): Directory containing ``*_tsnr_stats.json`` files.
     Returns:
@@ -111,14 +111,14 @@ def discover_phantom_stats_files(stats_dir: Path) -> List[Path]:
         ValueError: If ``stats_dir`` is not a directory.
     """
     if not stats_dir.is_dir():
-        raise ValueError(f"--phantom-stats-dir is not a directory: {stats_dir}")
+        raise ValueError(f"--stats-dir is not a directory: {stats_dir}")
     return sorted(p for p in stats_dir.glob("*_tsnr_stats.json") if p.is_file())
 
 
-def default_out_dir_for_phantom_stats_dir(stats_dir: Path) -> Path:
-    """Default phantom report directory, dataset-local when possible.
+def default_out_dir_for_stats_dir(stats_dir: Path) -> Path:
+    """Default non-BIDS report directory, dataset-local when possible.
     Args:
-        stats_dir (Path): Directory used with ``--phantom-stats-dir``.
+        stats_dir (Path): Directory used with ``--stats-dir``.
     Returns:
         Path: Default report output directory.
     """
@@ -165,18 +165,18 @@ def _metadata_date_from_payload(payload: Dict[str, object]) -> Optional[str]:
     return None
 
 
-def resolve_phantom_session_label(
+def resolve_non_bids_session_label(
     payload: Dict[str, object],
     stats_path: Path,
     label_by: str,
 ) -> str:
-    """Resolve plotting session label for phantom QA rows.
+    """Resolve plotting session label for non-BIDS rows.
     Args:
         payload (Dict[str, object]): Stats JSON payload.
         stats_path (Path): Stats JSON path.
         label_by (str): One of ``auto``, ``metadata_date``, ``filename_date``.
     Returns:
-        str: Label used as phantom QA session key.
+        str: Label used as the session key.
     """
     metadata_date = _metadata_date_from_payload(payload)
     input_file = payload.get("input_file")
@@ -308,13 +308,13 @@ def load_metric_rows(stats_paths: Sequence[Path]) -> List[Dict[str, object]]:
     return rows
 
 
-def load_phantom_metric_rows(
+def load_non_bids_metric_rows(
     stats_paths: Sequence[Path],
     label_by: str,
 ) -> List[Dict[str, object]]:
-    """Load phantom rows for QA-session comparisons (non-BIDS naming).
+    """Load non-BIDS rows for QA-session comparisons.
     Args:
-        stats_paths (Sequence[Path]): Phantom stats JSON paths.
+        stats_paths (Sequence[Path]): Non-BIDS stats JSON paths.
         label_by (str): Label source mode (``auto``, ``metadata_date``, ``filename_date``).
     Returns:
         List[Dict[str, object]]: Rows shaped for existing aggregation helpers.
@@ -323,12 +323,12 @@ def load_phantom_metric_rows(
     for stats_path in stats_paths:
         try:
             payload = _read_json(stats_path)
-            qa_session = resolve_phantom_session_label(payload, stats_path=stats_path, label_by=label_by)
+            qa_session = resolve_non_bids_session_label(payload, stats_path=stats_path, label_by=label_by)
             run_id = re.sub(r"_tsnr_stats\\.json$", "", stats_path.name)
             row: Dict[str, object] = {
                 "stats_path": str(stats_path),
-                "sub": "phantom",
-                "ses": "qa-series",
+                "sub": "non-bids",
+                "ses": "session-series",
                 "task": run_id,
                 "echo": qa_session,
                 "qa_session": qa_session,
@@ -389,6 +389,33 @@ def load_phantom_metric_rows(
         except (ValueError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             print(f"Warning: skipping {stats_path}: {exc}")
     return rows
+
+
+def discover_phantom_stats_files(stats_dir: Path) -> List[Path]:
+    """Backward-compatible alias for ``discover_non_bids_stats_files``."""
+    return discover_non_bids_stats_files(stats_dir)
+
+
+def default_out_dir_for_phantom_stats_dir(stats_dir: Path) -> Path:
+    """Backward-compatible alias for ``default_out_dir_for_stats_dir``."""
+    return default_out_dir_for_stats_dir(stats_dir)
+
+
+def resolve_phantom_session_label(
+    payload: Dict[str, object],
+    stats_path: Path,
+    label_by: str,
+) -> str:
+    """Backward-compatible alias for ``resolve_non_bids_session_label``."""
+    return resolve_non_bids_session_label(payload=payload, stats_path=stats_path, label_by=label_by)
+
+
+def load_phantom_metric_rows(
+    stats_paths: Sequence[Path],
+    label_by: str,
+) -> List[Dict[str, object]]:
+    """Backward-compatible alias for ``load_non_bids_metric_rows``."""
+    return load_non_bids_metric_rows(stats_paths=stats_paths, label_by=label_by)
 
 
 def _raise_if_mixed_slice_metrics(rows: Sequence[Dict[str, object]]) -> None:
@@ -810,35 +837,35 @@ def _slice_panel_suptitle(
     return f"Slice-level spike summary across echoes ({scope}; {split})"
 
 
-def _panel_suptitle_qa_sessions(
+def _panel_suptitle_non_bids_sessions(
     subject: Optional[str],
     session: Optional[str],
     group_by_task: bool,
     show_error_bars: bool = True,
 ) -> str:
-    """Build core-panel title for phantom QA-session comparisons."""
+    """Build core-panel title for non-BIDS session comparisons."""
     _ = (subject, session, group_by_task)
     return "tSNR/fTSNR summary across QA sessions"
 
 
-def _spike_panel_suptitle_qa_sessions(
+def _spike_panel_suptitle_non_bids_sessions(
     subject: Optional[str],
     session: Optional[str],
     group_by_task: bool,
     show_error_bars: bool = True,
 ) -> str:
-    """Build spike-panel title for phantom QA-session comparisons."""
+    """Build spike-panel title for non-BIDS session comparisons."""
     _ = (subject, session, group_by_task)
     return "ROI mean TR spike metrics (robust z) across QA sessions"
 
 
-def _slice_panel_suptitle_qa_sessions(
+def _slice_panel_suptitle_non_bids_sessions(
     subject: Optional[str],
     session: Optional[str],
     group_by_task: bool,
     show_error_bars: bool = True,
 ) -> str:
-    """Build slice-panel title for phantom QA-session comparisons."""
+    """Build slice-panel title for non-BIDS session comparisons."""
     _ = (subject, session, group_by_task)
     return "Slice-level spike summary across QA sessions"
 
@@ -1290,6 +1317,7 @@ def run_report(
     robust_z_tr_panels: bool = False,
     roi_mean_signal_tr_panels: bool = False,
     show_error_bars: bool = True,
+    stats_dir: Optional[Path] = None,
     phantom_stats_dir: Optional[Path] = None,
     label_by: str = "auto",
     spike_metrics_panels: bool = False,
@@ -1305,8 +1333,9 @@ def run_report(
         robust_z_tr_panels (bool): When True, write ``robust_z_vs_tr_{subject}_{session}.png`` (requires subject and session).
         roi_mean_signal_tr_panels (bool): When True, write ``roi_mean_signal_vs_tr_{subject}_{session}.png`` (raw ROI mean vs TR).
         show_error_bars (bool): When False, echo panels use lines without y error bars.
-        phantom_stats_dir (Optional[Path]): Directory with phantom ``*_tsnr_stats.json`` files (phantom mode).
-        label_by (str): Phantom label mode: ``auto``, ``metadata_date``, or ``filename_date``.
+        stats_dir (Optional[Path]): Directory with non-BIDS ``*_tsnr_stats.json`` files.
+        phantom_stats_dir (Optional[Path]): Deprecated alias for ``stats_dir``.
+        label_by (str): Non-BIDS label mode: ``auto``, ``metadata_date``, or ``filename_date``.
         spike_metrics_panels (bool): When True and all inputs carry ROI spike metrics, write the
             spike-metrics PNG and add spike fields to the summary CSV (default off).
     Returns:
@@ -1314,23 +1343,26 @@ def run_report(
     Raises:
         ValueError: If no valid stats rows are found.
     """
-    if phantom_stats_dir is not None:
-        stats_files = discover_phantom_stats_files(phantom_stats_dir)
-        rows = load_phantom_metric_rows(stats_files, label_by=label_by)
-        # Phantom mode compares QA sessions directly; ignore BIDS filters and task grouping.
-        subject = "phantom"
-        session = "qa-series"
+    effective_stats_dir = stats_dir if stats_dir is not None else phantom_stats_dir
+    if stats_dir is not None and phantom_stats_dir is not None and stats_dir != phantom_stats_dir:
+        raise ValueError("Use only one of stats_dir or phantom_stats_dir")
+    if effective_stats_dir is not None:
+        stats_files = discover_non_bids_stats_files(effective_stats_dir)
+        rows = load_non_bids_metric_rows(stats_files, label_by=label_by)
+        # Non-BIDS mode compares session labels directly; ignore BIDS filters and task grouping.
+        subject = "non-bids"
+        session = "session-series"
         group_by_task = False
         x_axis_label = "By session"
         axis_group_label = "session"
         panel_suffix = "session"
         include_error_mode_in_title = False
-        core_suptitle_fn = _panel_suptitle_qa_sessions
-        spike_suptitle_fn = _spike_panel_suptitle_qa_sessions
-        slice_suptitle_fn = _slice_panel_suptitle_qa_sessions
+        core_suptitle_fn = _panel_suptitle_non_bids_sessions
+        spike_suptitle_fn = _spike_panel_suptitle_non_bids_sessions
+        slice_suptitle_fn = _slice_panel_suptitle_non_bids_sessions
     else:
         if bids_root is None:
-            raise ValueError("bids_root is required when phantom_stats_dir is not provided")
+            raise ValueError("bids_root is required when stats_dir is not provided")
         stats_files = discover_stats_files(bids_root)
         rows = filter_rows(load_metric_rows(stats_files), subject=subject, session=session)
         x_axis_label = "Echo"
@@ -1343,7 +1375,7 @@ def run_report(
     if not rows:
         raise ValueError(
             "No valid stats rows discovered under "
-            f"{phantom_stats_dir if phantom_stats_dir is not None else bids_root} "
+            f"{effective_stats_dir if effective_stats_dir is not None else bids_root} "
             f"for filters subject={subject!r}, session={session!r}"
         )
 
@@ -1437,7 +1469,7 @@ def run_report(
     generated.append(csv_path)
 
     if robust_z_tr_panels:
-        if phantom_stats_dir is not None:
+        if effective_stats_dir is not None:
             raise ValueError("--robust-z-tr-panels is available only in BIDS mode")
         if subject is None or session is None:
             raise ValueError("--robust-z-tr-panels requires --subject and --session")
@@ -1448,7 +1480,7 @@ def run_report(
         if plot_robust_z_tr_session_grid(session_paths, rz_path, subject=subject, session=session):
             generated.append(rz_path)
     if roi_mean_signal_tr_panels:
-        if phantom_stats_dir is not None:
+        if effective_stats_dir is not None:
             raise ValueError("--roi-mean-signal-tr-panels is available only in BIDS mode")
         if subject is None or session is None:
             raise ValueError("--roi-mean-signal-tr-panels requires --subject and --session")
@@ -1466,7 +1498,13 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: Configured parser.
     """
-    parser = argparse.ArgumentParser(description="Plot tSNR/fTSNR stats across echo and session.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Plot tSNR/fTSNR stats across echo and session. "
+            "If every input stats JSON includes slice_ftsnr_metrics with complete worst-slice fields, "
+            "also writes slice_metrics_panel_by_*_<error>.png and corresponding CSV rows."
+        )
+    )
     parser.add_argument(
         "--bids-root",
         type=Path,
@@ -1474,17 +1512,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="BIDS dataset root containing sub-*/ses-*/derivatives/tsnr stats JSON files.",
     )
     parser.add_argument(
-        "--phantom-stats-dir",
+        "--stats-dir",
+        dest="stats_dir",
         type=Path,
         default=None,
-        help="Directory containing phantom *_tsnr_stats.json files (non-BIDS workflow).",
+        help="Directory containing *_tsnr_stats.json files for non-BIDS workflow.",
+    )
+    parser.add_argument(
+        "--phantom-stats-dir",
+        dest="stats_dir",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--label-by",
         type=str,
         default="auto",
         choices=LABEL_BY_CHOICES,
-        help="In phantom mode, resolve session labels from metadata date, filename date, or auto.",
+        help="In non-BIDS mode, resolve session labels from metadata date, filename date, or auto.",
     )
     parser.add_argument(
         "--out-dir",
@@ -1564,18 +1610,16 @@ def cli(argv: Optional[List[str]] = None) -> int:
     """
     args = build_parser().parse_args(argv)
     bids_root = args.bids_root.expanduser() if args.bids_root is not None else None
-    phantom_stats_dir = (
-        args.phantom_stats_dir.expanduser() if args.phantom_stats_dir is not None else None
-    )
-    if (bids_root is None) == (phantom_stats_dir is None):
-        print("Error: provide exactly one of --bids-root or --phantom-stats-dir")
+    stats_dir = args.stats_dir.expanduser() if args.stats_dir is not None else None
+    if (bids_root is None) == (stats_dir is None):
+        print("Error: provide exactly one of --bids-root or --stats-dir")
         return 1
     if args.no_error_bars and args.show_error_bars:
         print("Error: use only one of --no-error-bars and --show-error-bars")
         return 1
     out_dir = args.out_dir.expanduser()
-    if phantom_stats_dir is not None and args.out_dir == Path("reports") / "tsnr_plots":
-        out_dir = default_out_dir_for_phantom_stats_dir(phantom_stats_dir)
+    if stats_dir is not None and args.out_dir == Path("reports") / "tsnr_plots":
+        out_dir = default_out_dir_for_stats_dir(stats_dir)
     has_sub_ses = args.subject is not None and args.session is not None
     if args.pool_across_tasks:
         group_by_task = False
@@ -1602,7 +1646,7 @@ def cli(argv: Optional[List[str]] = None) -> int:
             robust_z_tr_panels=bool(args.robust_z_tr_panels),
             roi_mean_signal_tr_panels=bool(args.roi_mean_signal_tr_panels),
             show_error_bars=show_error_bars,
-            phantom_stats_dir=phantom_stats_dir,
+            stats_dir=stats_dir,
             label_by=str(args.label_by),
             spike_metrics_panels=bool(args.spike_metrics_panels),
         )

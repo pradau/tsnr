@@ -66,19 +66,19 @@ Notes:
 ### Phantom patch reports
 
 ```bash
-uv run plot_tsnr_stats.py --phantom-stats-dir "phantom_regression/derivatives_patch" --out-dir "phantom_regression/reports_patch"
+uv run plot_tsnr_stats.py --stats-dir "phantom_regression/derivatives_patch" --out-dir "phantom_regression/reports_patch"
 ```
 
 ### Phantom full_minus_edges reports
 
 ```bash
-uv run plot_tsnr_stats.py --phantom-stats-dir "phantom_regression/derivatives_full_minus_edges" --out-dir "phantom_regression/reports_full_minus_edges"
+uv run plot_tsnr_stats.py --stats-dir "phantom_regression/derivatives_full_minus_edges" --out-dir "phantom_regression/reports_full_minus_edges"
 ```
 
 ### Brain reports (local)
 
 ```bash
-uv run plot_tsnr_stats.py --phantom-stats-dir "brain_regression/derivatives" --out-dir "brain_regression/reports"
+uv run plot_tsnr_stats.py --stats-dir "brain_regression/derivatives" --out-dir "brain_regression/reports"
 ```
 
 Expected report files in each report directory:
